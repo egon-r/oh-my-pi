@@ -27,6 +27,7 @@ const MENTAL_MODEL_LOAD_TIMED_OUT = Symbol("mental-model-load-timed-out");
 interface PendingRetainItem {
 	content: string;
 	context?: string;
+	tags?: string[];
 	timestamp: Date;
 }
 
@@ -40,7 +41,7 @@ export interface HindsightSessionStateOptions {
 	sessionId: string;
 	client: HindsightApi;
 	bankId: string;
-	/** Tags applied to every retain — non-empty in per-project-tagged mode. */
+	/** Default retain tags; explicit tool-item tags replace them. */
 	retainTags?: string[];
 	/** Tag filter applied to every recall/reflect — non-empty in per-project-tagged mode. */
 	recallTags?: string[];
@@ -82,11 +83,11 @@ export class HindsightRetainQueue {
 		return this.#items.length;
 	}
 
-	enqueue(content: string, context?: string): void {
+	enqueue(content: string, context?: string, tags?: string[]): void {
 		if (this.#closed) {
 			throw new Error("Hindsight retain queue is closed.");
 		}
-		this.#items.push({ content, context, timestamp: new Date() });
+		this.#items.push({ content, context, tags, timestamp: new Date() });
 
 		if (this.#items.length >= RETAIN_FLUSH_BATCH_SIZE) {
 			void this.flush();
@@ -155,7 +156,8 @@ export class HindsightRetainQueue {
 				content: item.content,
 				context: item.context ?? state.config.retainContext,
 				metadata: { session_id: sessionId },
-				tags: state.retainTags,
+				tags: item.tags ?? state.retainTags,
+				observationScopes: (item.tags ?? state.retainTags)?.length ? "combined" : undefined,
 				timestamp: item.timestamp,
 			}));
 			await state.client.retainBatch(state.bankId, batch, { async: true });
@@ -205,7 +207,7 @@ export class HindsightSessionState {
 	sessionId: string;
 	client: HindsightApi;
 	bankId: string;
-	/** Tags applied to every retain — non-empty in per-project-tagged mode. */
+	/** Default retain tags; explicit tool-item tags replace them. */
 	retainTags?: string[];
 	/** Tag filter applied to every recall/reflect — non-empty in per-project-tagged mode. */
 	recallTags?: string[];
@@ -281,8 +283,8 @@ export class HindsightSessionState {
 		this.#lastRetainedPrefixKey = "";
 	}
 
-	enqueueRetain(content: string, context?: string): void {
-		this.retainQueue.enqueue(content, context);
+	enqueueRetain(content: string, context?: string, tags?: string[]): void {
+		this.retainQueue.enqueue(content, context, tags);
 	}
 
 	async flushRetainQueue(): Promise<void> {

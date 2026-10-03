@@ -5,6 +5,7 @@
 ### Added
 
 - Added periodic completion estimates for running subagents: every 2 minutes each working subagent is asked, through a cached `/btw`-style side request, how far along it is, and the `XY%` shows next to it in wait and task views. Each check sees the subagent's previous estimate and any tool call it is still writing, so long file writes no longer read as 0%. Set the interval or turn it off with `task.completionProbeMs`.
+- Added optional per-item Hindsight retain tags that replace session defaults, preserve combined observation scopes, and reject invalid tag batches before any items are queued; Mnemopi retain schemas are unchanged.
 
 ## [18.4.10] - 2026-10-02
 

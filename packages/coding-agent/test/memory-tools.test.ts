@@ -298,6 +298,7 @@ describe("retain.execute", () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks();
+		registeredState?.retainQueue.dispose();
 		registeredState = undefined;
 	});
 
@@ -364,6 +365,101 @@ describe("retain.execute", () => {
 			}),
 		]);
 		expect(registeredState?.retainQueue.depth).toBe(0);
+	});
+
+	it("keeps explicit scopes separate from defaults in HTTP retain payloads", async () => {
+		const requests: { items: Record<string, unknown>[] }[] = [];
+		const server = Bun.serve({
+			port: 0,
+			fetch: async request => {
+				requests.push((await request.json()) as { items: Record<string, unknown>[] });
+				return Response.json({});
+			},
+		});
+		try {
+			const settings = Settings.isolated({ "memory.backend": "hindsight" });
+			const client = new HindsightApi({ baseUrl: server.url.toString() });
+			registerState(client, settings, { retainTags: ["project:pith"] });
+			registeredState!.banksSet.add("test-bank");
+			const tool = MemoryRetainTool.createIf(makeSession(settings))!;
+			await tool.execute("scoped", {
+				items: [
+					{ content: "game fact", context: "not a scope", tags: ["game:skyrim"] },
+					{
+						content: "integration fact",
+						tags: ["game:skyrim", "game:fallout-4", "pairing:skyrim-fallout-4"],
+					},
+					{ content: "project fact" },
+				],
+			});
+			await registeredState!.flushRetainQueue();
+			expect(requests[0].items).toEqual([
+				expect.objectContaining({
+					content: "game fact",
+					context: "not a scope",
+					tags: ["game:skyrim"],
+					observation_scopes: "combined",
+				}),
+				expect.objectContaining({
+					content: "integration fact",
+					tags: ["game:skyrim", "game:fallout-4", "pairing:skyrim-fallout-4"],
+					observation_scopes: "combined",
+				}),
+				expect.objectContaining({
+					content: "project fact",
+					tags: ["project:pith"],
+					observation_scopes: "combined",
+				}),
+			]);
+			registeredState!.retainQueue.dispose();
+			registerState(client, settings);
+			registeredState!.banksSet.add("test-bank");
+			await tool.execute("untagged", { items: [{ content: "legacy bank fact" }] });
+			await registeredState!.flushRetainQueue();
+			expect(requests[1].items[0]).not.toHaveProperty("tags");
+			expect(requests[1].items[0]).not.toHaveProperty("observation_scopes");
+		} finally {
+			server.stop(true);
+		}
+	});
+
+	it.each([{ tags: [] }, { tags: [""] }, { tags: [" \t\n"] }, { tags: ["game:skyrim", " "] }])(
+		"rejects invalid tags %j before queueing any part of a batch",
+		async ({ tags }) => {
+			const settings = Settings.isolated({ "memory.backend": "hindsight" });
+			registerState(new HindsightApi({ baseUrl: "http://unused.invalid" }), settings);
+			const tool = MemoryRetainTool.createIf(makeSession(settings))!;
+			await expect(
+				tool.execute("invalid-tags", {
+					items: [
+						...Array.from({ length: 16 }, (_, index) => ({
+							content: `valid fact ${index}`,
+							tags: ["game:skyrim"],
+						})),
+						{ content: "invalid fact", tags: [...tags] },
+					],
+				}),
+			).rejects.toThrow(/nonempty array of nonblank strings/i);
+			expect(registeredState!.retainQueue.depth).toBe(0);
+		},
+	);
+
+	it("offers tag validation only on the Hindsight schema", () => {
+		const hindsight = MemoryRetainTool.createIf(
+			makeSession(Settings.isolated({ "memory.backend": "hindsight" })),
+		)!;
+		expect(hindsight.parameters.allows({ items: [{ content: "fact", tags: ["game:skyrim"] }] })).toBe(true);
+		expect(hindsight.parameters.allows({ items: [{ content: "fact" }] })).toBe(true);
+		for (const tags of [[], [""], [" \t\n"]]) {
+			expect(hindsight.parameters.allows({ items: [{ content: "fact", tags }] })).toBe(false);
+		}
+		expect(hindsight.parameters.toJsonSchema()).toHaveProperty("properties.items.items.properties.tags");
+		for (const scoping of ["per-project", "per-project-tagged", "global"] as const) {
+			const mnemopi = MemoryRetainTool.createIf(
+				makeSession(Settings.isolated({ "memory.backend": "mnemopi", "mnemopi.scoping": scoping })),
+			)!;
+			expect(mnemopi.parameters.toJsonSchema()).not.toHaveProperty("properties.items.items.properties.tags");
+		}
 	});
 
 	it("emits a UI-only warning notice when the batch flush fails", async () => {

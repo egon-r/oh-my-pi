@@ -33,9 +33,29 @@ const memoryRetainSchemaWithScope = type({
 		.describe("memories to retain"),
 });
 
-type MemoryRetainSchema = typeof memoryRetainSchemaBase | typeof memoryRetainSchemaWithScope;
+const memoryRetainSchemaHindsight = type({
+	items: type({
+		content: type("string").describe("information to remember"),
+		"context?": type("string").describe("source context; not a tag or memory scope"),
+		"tags?": type("string")
+			.matching(/\S/)
+			.array()
+			.atLeastLength(1)
+			.describe("nonempty scope tags; replaces session default tags when provided"),
+	})
+		.array()
+		.atLeastLength(1)
+		.describe("memories to retain"),
+});
 
-export type MemoryRetainParams = typeof memoryRetainSchemaWithScope.infer;
+type MemoryRetainSchema =
+	| typeof memoryRetainSchemaBase
+	| typeof memoryRetainSchemaWithScope
+	| typeof memoryRetainSchemaHindsight;
+
+export type MemoryRetainParams = {
+	items: (typeof memoryRetainSchemaWithScope.infer.items[number] & { tags?: string[] })[];
+};
 export class MemoryRetainTool implements AgentTool<MemoryRetainSchema, MemoryRetainDetails> {
 	readonly name = "retain";
 	/** A global item reaches every project's recall, so it needs the same approval as a file write. */
@@ -43,9 +63,13 @@ export class MemoryRetainTool implements AgentTool<MemoryRetainSchema, MemoryRet
 		(args as Partial<MemoryRetainParams>).items?.some(item => item.scope === "global") ? "write" : "read";
 	readonly label = "Retain";
 	get description(): string {
-		return prompt.render(retainDescription, { globalScope: isGlobalMemoryScopeAvailable(this.session.settings) });
+		return prompt.render(retainDescription, {
+			globalScope: isGlobalMemoryScopeAvailable(this.session.settings),
+			hindsight: cfgMemoryBackend.get(this.session.settings) === "hindsight",
+		});
 	}
 	get parameters(): MemoryRetainSchema {
+		if (cfgMemoryBackend.get(this.session.settings) === "hindsight") return memoryRetainSchemaHindsight;
 		return isGlobalMemoryScopeAvailable(this.session.settings) ? memoryRetainSchemaWithScope : memoryRetainSchemaBase;
 	}
 	readonly strict = true;
@@ -129,13 +153,25 @@ export class MemoryRetainTool implements AgentTool<MemoryRetainSchema, MemoryRet
 		if (params.items.some(item => item.scope === "global")) {
 			throw new Error("Global memory scope is only available with the Mnemopi backend.");
 		}
+		// Validate the whole batch before queueing: a later invalid item must not
+		// leave earlier facts queued (or trigger the queue's threshold flush).
+		for (const item of params.items) {
+			if (
+				item.tags !== undefined &&
+				(!Array.isArray(item.tags) ||
+					item.tags.length === 0 ||
+					item.tags.some(tag => typeof tag !== "string" || tag.trim().length === 0))
+			) {
+				throw new Error("Hindsight retain tags must be a nonempty array of nonblank strings.");
+			}
+		}
 
 		// Push every item onto the session-owned queue and return immediately.
 		// The queue flushes either when it reaches its batch threshold or when
 		// its debounce timer fires. If the eventual batch fails, the queue
 		// surfaces a UI-only warning notice — the LLM is not informed.
 		for (const item of params.items) {
-			state.enqueueRetain(item.content, item.context);
+			state.enqueueRetain(item.content, item.context, item.tags);
 		}
 
 		const count = params.items.length;
