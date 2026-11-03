@@ -1,11 +1,15 @@
 #!/usr/bin/env bun
 /**
- * macOS arm64 downstream release. Requires Bun 1.4.4, installed workspace
+ * Downstream release build for the native host: macOS arm64 release archives
+ * and Linux x64 local builds. Requires Bun 1.4.4, installed workspace
  * dependencies (bun install --frozen-lockfile --ignore-scripts), Xcode command
- * line tools (codesign, tar), and HTTPS access to registry.npmjs.org when the
- * matching native addon is not already provisioned. No Rust toolchain needed.
- * Outputs dist/omp-macos-arm64.tar.gz (bin/omp, LICENSE) and dist/SHA256SUMS.
- * Source metadata/native versions are never bumped; all overrides are build-local.
+ * line tools on macOS (codesign, tar), and HTTPS access to registry.npmjs.org
+ * when the matching native addon is not already provisioned. No Rust toolchain
+ * needed. macOS outputs dist/omp-macos-arm64.tar.gz (bin/omp, LICENSE) and
+ * dist/SHA256SUMS; Linux outputs the unsigned dist/omp-linux-x64 executable
+ * and dist/SHA256SUMS for local installation (no release archive, no publish).
+ * Source metadata/native versions are never bumped; all overrides are
+ * build-local.
  */
 import { createHash, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
@@ -17,8 +21,36 @@ import { containsLegacyVersionSentinel, containsVersionStamp } from "../packages
 import { compileCodingAgent } from "../packages/coding-agent/scripts/compile-binary";
 
 const root = path.resolve(import.meta.dir, "..");
-const addonName = "pi_natives.darwin-arm64.node";
-const addonPath = path.join(root, "packages/natives/native", addonName);
+interface DownstreamHost {
+	platform: "darwin" | "linux";
+	arch: "arm64" | "x64";
+	addonNames: string[];
+	nativePackage: string;
+	target: Bun.Build.CompileTarget;
+}
+
+/** Host platforms whose upstream native leaf package this script reuses. */
+function downstreamHost(): DownstreamHost | null {
+	if (process.platform === "darwin" && process.arch === "arm64") {
+		return {
+			platform: "darwin",
+			arch: "arm64",
+			addonNames: ["pi_natives.darwin-arm64.node"],
+			nativePackage: "@oh-my-pi/pi-natives-darwin-arm64",
+			target: "bun-darwin-arm64",
+		};
+	}
+	if (process.platform === "linux" && process.arch === "x64") {
+		return {
+			platform: "linux",
+			arch: "x64",
+			addonNames: ["pi_natives.linux-x64-baseline.node", "pi_natives.linux-x64-modern.node"],
+			nativePackage: "@oh-my-pi/pi-natives-linux-x64",
+			target: "bun-linux-x64",
+		};
+	}
+	return null;
+}
 
 async function run(command: string[], cwd = root): Promise<void> {
 	const proc = Bun.spawn(command, { cwd, stdout: "inherit", stderr: "inherit" });
@@ -31,22 +63,28 @@ async function fetchChecked(url: string): Promise<Response> {
 	return response;
 }
 
-async function provisionNative(version: string, temporary: string): Promise<void> {
-	let existing: Buffer | undefined;
-	try {
-		existing = await fs.readFile(addonPath);
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-	}
-	if (existing) {
+async function provisionNative(host: DownstreamHost, version: string, temporary: string): Promise<void> {
+	const addonPaths = host.addonNames.map(name => path.join(root, "packages/natives/native", name));
+	const missing: string[] = [];
+	for (const [index, addonPath] of addonPaths.entries()) {
+		let existing: Buffer | undefined;
+		try {
+			existing = await fs.readFile(addonPath);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+		if (!existing) {
+			missing.push(host.addonNames[index]);
+			continue;
+		}
 		if (!containsVersionStamp(existing, version) && !containsLegacyVersionSentinel(existing, version)) {
 			throw new Error(
 				`Existing ${addonPath} does not match upstream ${version}; provision the matching addon first`,
 			);
 		}
-		return;
 	}
-	const packageName = "@oh-my-pi/pi-natives-darwin-arm64";
+	if (missing.length === 0) return;
+	const packageName = host.nativePackage;
 	const manifest = (await (
 		await fetchChecked(`https://registry.npmjs.org/${encodeURIComponent(packageName)}/${version}`)
 	).json()) as {
@@ -68,19 +106,21 @@ async function provisionNative(version: string, temporary: string): Promise<void
 		throw new Error("Native tarball integrity mismatch");
 	const tarball = path.join(temporary, "native.tgz");
 	await fs.writeFile(tarball, bytes);
-	await run(["tar", "-xzf", tarball, "-C", temporary, `package/${addonName}`]);
-	const addon = await fs.readFile(path.join(temporary, "package", addonName));
-	if (!containsVersionStamp(addon, version) && !containsLegacyVersionSentinel(addon, version)) {
-		throw new Error("Downloaded native addon lacks matching upstream version stamp");
+	for (const addonName of missing) {
+		await run(["tar", "-xzf", tarball, "-C", temporary, `package/${addonName}`]);
+		const addon = await fs.readFile(path.join(temporary, "package", addonName));
+		if (!containsVersionStamp(addon, version) && !containsLegacyVersionSentinel(addon, version)) {
+			throw new Error("Downloaded native addon lacks matching upstream version stamp");
+		}
+		// Keep this validated, ignored dependency for subsequent source tests.
+		// Exclusive creation never clobbers an addon installed by another process.
+		await fs.writeFile(addonPaths[host.addonNames.indexOf(addonName)], addon, { flag: "wx" });
 	}
-	// Keep this validated, ignored dependency for subsequent source tests.
-	// Exclusive creation never clobbers an addon installed by another process.
-	await fs.writeFile(addonPath, addon, { flag: "wx" });
 }
 
 async function main(): Promise<void> {
-	if (process.platform !== "darwin" || process.arch !== "arm64")
-		throw new Error("Downstream releases require a native macOS arm64 host");
+	const host = downstreamHost();
+	if (!host) throw new Error("Downstream builds require a native macOS arm64 or Linux x64 host");
 	if (Bun.version !== "1.4.4") throw new Error(`Expected Bun 1.4.4, got ${Bun.version}; select it with mise`);
 	// The compiler embeds docs/**/*.md. Refuse local-only or edited docs so
 	// workstation notes cannot accidentally enter a public release binary.
@@ -110,7 +150,7 @@ async function main(): Promise<void> {
 	const statsPath = path.join(root, "packages/stats/src/embedded-client.generated.txt");
 	let originalStats: Buffer | undefined;
 	try {
-		await provisionNative(upstream, temporary);
+		await provisionNative(host, upstream, temporary);
 		originalStats = await fs.readFile(statsPath);
 		await run([process.execPath, "run", "gen:stats"]);
 		const viewerMetadata = await buildExportViewer({ outDir: path.join(temporary, "export-assets") });
@@ -137,10 +177,10 @@ async function main(): Promise<void> {
 			entrypoint: path.join(root, "packages/coding-agent/src/cli.ts"),
 			outfile,
 			transformersVersion,
-			native: { platform: "darwin", arch: "arm64" },
-			target: "bun-darwin-arm64",
+			native: { platform: host.platform, arch: host.arch },
+			target: host.target,
 			minifyIdentifiers: true,
-			skipBuiltinCodesign: true,
+			skipBuiltinCodesign: host.platform === "darwin",
 			files: {
 				[utilsManifestPath]: JSON.stringify({ ...utilsManifest, version }),
 				[updatePath]: managedSource,
@@ -148,47 +188,57 @@ async function main(): Promise<void> {
 					JSON.stringify(viewerMetadata),
 			},
 		});
-		await run([
-			"codesign",
-			"--force",
-			"--sign",
-			"-",
-			"--entitlements",
-			path.join(root, "scripts/macos-entitlements.plist"),
-			outfile,
-		]);
+		if (host.platform === "darwin") {
+			await run([
+				"codesign",
+				"--force",
+				"--sign",
+				"-",
+				"--entitlements",
+				path.join(root, "scripts/macos-entitlements.plist"),
+				outfile,
+			]);
+		}
 		await fs.chmod(outfile, 0o755);
-		await fs.copyFile(path.join(root, "LICENSE"), path.join(stage, "LICENSE"));
 		const dist = path.join(root, "dist");
 		await fs.mkdir(dist, { recursive: true });
-		const archiveName = "omp-macos-arm64.tar.gz";
-		const archive = path.join(temporary, archiveName);
-		await run([
-			"tar",
-			"--uid",
-			"0",
-			"--gid",
-			"0",
-			"--uname",
-			"root",
-			"--gname",
-			"root",
-			"--no-xattrs",
-			"--no-acls",
-			"--disable-copyfile",
-			"-czf",
-			archive,
-			"-C",
-			stage,
-			"bin/omp",
-			"LICENSE",
-		]);
+		let artifactName: string;
+		let artifactPath: string;
+		if (host.platform === "darwin") {
+			await fs.copyFile(path.join(root, "LICENSE"), path.join(stage, "LICENSE"));
+			artifactName = "omp-macos-arm64.tar.gz";
+			artifactPath = path.join(temporary, artifactName);
+			await run([
+				"tar",
+				"--uid",
+				"0",
+				"--gid",
+				"0",
+				"--uname",
+				"root",
+				"--gname",
+				"root",
+				"--no-xattrs",
+				"--no-acls",
+				"--disable-copyfile",
+				"-czf",
+				artifactPath,
+				"-C",
+				stage,
+				"bin/omp",
+				"LICENSE",
+			]);
+		} else {
+			// Local Linux build: ship the standalone executable itself, no release archive.
+			artifactName = "omp-linux-x64";
+			artifactPath = path.join(stage, "bin/omp");
+		}
 		const digest = createHash("sha256")
-			.update(await fs.readFile(archive))
+			.update(await fs.readFile(artifactPath))
 			.digest("hex");
-		await fs.copyFile(archive, path.join(dist, archiveName));
-		await fs.writeFile(path.join(dist, "SHA256SUMS"), `${digest}  ${archiveName}\n`);
-		console.log(`Built ${version}: dist/${archiveName} and dist/SHA256SUMS`);
+		await fs.copyFile(artifactPath, path.join(dist, artifactName));
+		await fs.writeFile(path.join(dist, "SHA256SUMS"), `${digest}  ${artifactName}\n`);
+		console.log(`Built ${version}: dist/${artifactName} and dist/SHA256SUMS`);
 	} finally {
 		try {
 			if (originalStats !== undefined) await fs.writeFile(statsPath, originalStats);

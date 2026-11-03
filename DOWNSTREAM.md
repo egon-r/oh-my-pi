@@ -7,6 +7,7 @@ This is an independently maintained fork of [can1357/oh-my-pi](https://github.co
 `downstream-version.txt` is the downstream release version: `<upstream-version>-egon.<revision>`, initially `18.16.0-egon.1`. Increment the downstream revision for each changed build; do not replace assets of a published version. When integrating a newer upstream, change the upstream part and restart at `egon.1`.
 
 The first binary distribution supports **macOS Apple Silicon only**. Releases contain `omp-macos-arm64.tar.gz` and `SHA256SUMS`. The archive contains only `bin/omp` and `LICENSE`. The executable is ad-hoc signed, not Apple-notarized. Review the source and use macOS's explicit approval flow if Gatekeeper blocks a downloaded binary.
+On Linux x64 hosts the same script performs a local source build: `bun scripts/build-downstream.ts` compiles the standalone `dist/omp-linux-x64` executable plus `dist/SHA256SUMS` for installing on the build host — no archive, signing, release, or publish step. Native addons are reused from the matching upstream `@oh-my-pi/pi-natives-linux-x64` npm package with the same integrity and version-stamp checks.
 
 The compiled version string identifies this fork. Native code is reused from the matching published upstream npm native package, with package integrity verified during the build. This release path is suitable for TypeScript changes; changes to native Rust code require building and embedding a matching custom native addon before publishing.
 
@@ -36,7 +37,7 @@ The formula installs the same `omp` executable, so it conflicts with the upstrea
 
 ## Build, check, and publish
 
-Bun 1.4.4 and macOS command-line developer tools are required:
+Bun 1.4.4 is required on every host; macOS release builds additionally need the command-line developer tools (`codesign`, `tar`):
 
 ```sh
 bun install --frozen-lockfile --ignore-scripts
