@@ -19,7 +19,7 @@
  * const apiKey = await auth.keys.get("anthropic", sessionId, { modelId });
  */
 import { logger } from "@oh-my-pi/pi-utils";
-import { SessionAffinity } from "./auth/affinity";
+import { SessionAffinity, type SessionRestrictions } from "./auth/affinity";
 import { BlockStoreHealth, CredentialBlocks } from "./auth/blocks";
 import { KeyCascade, KeyOverrides } from "./auth/cascade";
 import { CredentialHealth } from "./auth/health";
@@ -52,13 +52,21 @@ import { DEFAULT_USAGE_REQUEST_TIMEOUT_MS, UsageCache } from "./auth/usage-cache
 import type { UsageLogger } from "./usage";
 import { defaultRankingStrategy, defaultUsageProvider } from "./usage/registry";
 
-export { isSqliteBusyError, isSqliteCorruptionError, SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
+export {
+	isSameOAuthAccount,
+	isSqliteBusyError,
+	isSqliteCorruptionError,
+	matchesReplacementCredential,
+	resolveCredentialIdentityKey,
+	SqliteAuthCredentialStore,
+} from "./auth/sqlite-credential-store";
 export * from "./auth/store";
 export * from "./auth/types";
 
 /** Store-bound credential modules; rebuilt as a unit by {@link AuthStorage.replaceStore}. */
 interface AuthStorageModules {
 	pool: CredentialPool;
+	refresher: OAuthRefresher;
 	keys: KeyCascade;
 	oauth: OAuthAccounts;
 	sessions: SessionAffinity;
@@ -81,6 +89,7 @@ export class AuthStorage {
 	readonly #options: AuthStorageOptions;
 	readonly #overrides: KeyOverrides;
 	readonly #policies: AccountPolicies;
+	readonly #restrictions: SessionRestrictions = new Map();
 	#modules: AuthStorageModules;
 
 	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}) {
@@ -131,8 +140,9 @@ export class AuthStorage {
 	/**
 	 * Apply new account routing policy (live `auth.accountPolicies` /
 	 * `retry.usageReservePct` change). Throws a configuration error, leaving the
-	 * active policy untouched, when the policy is malformed or does not match the
-	 * stored OAuth accounts.
+	 * active policy untouched, when a policy is malformed, a selector matches
+	 * several stored OAuth accounts, or two policies claim the same account; a
+	 * policy naming an absent account stays inactive and logs a warning.
 	 */
 	setAccountPolicies(config: { accountPolicies: AuthAccountPolicies; defaultReservePct: number }): void {
 		const pool = this.#modules.pool;
@@ -144,10 +154,11 @@ export class AuthStorage {
 	/**
 	 * Swap the backing credential store in place (live `auth.broker.url` change).
 	 * Loads `store` into fresh store-bound state — pins, blocks, and usage caches are
-	 * keyed by the old store's row ids — then closes the previous store. Runtime key
-	 * overrides, account policies, usage-provider overrides, and credential event
-	 * subscribers carry over. On a load failure `store` is closed and the current
-	 * store stays active.
+	 * keyed by the old store's row ids — then retires the previous store like
+	 * {@link AuthStorage.close}. Runtime key overrides, account policies, session
+	 * account restrictions, usage-provider overrides, and credential event
+	 * subscribers carry over. On a load failure
+	 * `store` is closed and the current store stays active.
 	 */
 	async replaceStore(store: AuthCredentialStore, options: { sourceLabel?: string } = {}): Promise<void> {
 		const next = this.#compose(store, options.sourceLabel ?? this.#options.sourceLabel);
@@ -161,7 +172,7 @@ export class AuthStorage {
 		next.pool.adoptSubscribers(previous.pool);
 		next.usage.adoptRuntimeProviders(previous.usage);
 		this.#modules = next;
-		previous.pool.close();
+		retire(previous);
 		next.pool.bump("store-replaced");
 	}
 
@@ -179,13 +190,18 @@ export class AuthStorage {
 				affinity.clearProvider(provider);
 			},
 		});
-		const refresher = new OAuthRefresher({ store, pool, policies, override: options.refreshOAuthCredential });
+		const refresher = new OAuthRefresher({
+			store,
+			pool,
+			override: options.refreshOAuthCredential,
+			overrideMints: options.refreshOAuthCredentialMints,
+		});
 		const usageProviders = options.usageProviderResolver ?? defaultUsageProvider;
 		// Key reports by the effective provider (runtime extension override first), so an
 		// override's `cacheVersion` separates its rows from other processes sharing the store.
 		const usageCache = new UsageCache(store, pool, provider => usage.providerFor(provider));
 		const blocks = new CredentialBlocks({ store, pool, health: blockHealth, usageCache, strategies });
-		const affinity = new SessionAffinity(store, pool, overrides);
+		const affinity = new SessionAffinity(store, pool, overrides, this.#restrictions);
 		const usage = new UsageService({
 			store,
 			pool,
@@ -228,6 +244,7 @@ export class AuthStorage {
 
 		return {
 			pool,
+			refresher,
 			keys,
 			oauth,
 			sessions: affinity,
@@ -256,9 +273,13 @@ export class AuthStorage {
 		return new AuthStorage(store, options);
 	}
 
-	/** Close the underlying credential store; the instance must not be reused. */
+	/**
+	 * Close the underlying credential store; the instance must not be reused.
+	 * New OAuth refreshes are refused at once; a token exchange already under way
+	 * keeps the store open until it has saved the rotated token.
+	 */
 	close(): void {
-		this.#modules.pool.close();
+		retire(this.#modules);
 	}
 
 	/**
@@ -276,4 +297,9 @@ export class AuthStorage {
 	reload(): Promise<void> {
 		return this.credentials.reload();
 	}
+}
+
+/** Stop store-bound modules: refuse new refreshes, close the store once in-flight ones have saved. */
+function retire(modules: AuthStorageModules): void {
+	modules.refresher.close(() => modules.pool.close());
 }

@@ -2,7 +2,13 @@ import { colorLuma, relativeLuminance } from "@oh-my-pi/pi-utils/color";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { bgAnsi, colorToAnsi, fgAnsi, resolveToHex } from "./color";
-import { type ColorMode, isValidThemeColor, type ThemeBg, type ThemeColor } from "./schema";
+import {
+	type ColorMode,
+	isValidThemeColor,
+	OPTIONAL_THEME_COLOR_RECORD,
+	type ThemeBg,
+	type ThemeColor,
+} from "./schema";
 import type { SessionAccentTheme } from "./session-color";
 import {
 	type SlashCommandIconName,
@@ -132,6 +138,15 @@ const LANG_BRAND_COLORS: Partial<Record<SymbolKey, string>> = {
 const BACKGROUND_RESET_PATTERN = /\x1b\[(?:0|49)m/g;
 const FOREGROUND_RESET_PATTERN = /\x1b\[(?:0|39)m/g;
 
+/**
+ * Color `text` with the foreground `ansi`, restoring it after every nested reset so the rest of `text`
+ * keeps it (`fg("dim", `${fg("success", "+2")} more`)`); only the foreground is reset at the end.
+ */
+function wrapForeground(ansi: string, text: string): string {
+	const body = text.includes("\x1b[") ? text.replace(FOREGROUND_RESET_PATTERN, `$&${ansi}`) : text;
+	return `${ansi}${body}\x1b[39m`;
+}
+
 // Prebuilt stylers: each `chalk.<style>` access builds a fresh builder. Builders share the
 // root chalk context, so later `chalk.level` changes still apply.
 const boldStyler = chalk.bold;
@@ -204,6 +219,14 @@ export class Theme {
 			this.#fgColors[key] = fgAnsi(value, mode);
 			this.#hexFgColors[key] = hex;
 		}
+		// A theme may omit an optional token, but callers can still name it (a
+		// `modelTags.<role>.color` reference is validated against the theme color
+		// list). Resolve those to the terminal default so `fg()` stays total while
+		// `hasColor()` reports them as unset.
+		for (const key of Object.keys(OPTIONAL_THEME_COLOR_RECORD) as ThemeColor[]) {
+			this.#fgColors[key] ??= "\x1b[39m";
+			this.#hexFgColors[key] ??= "";
+		}
 		this.#bgColors = {} as Record<ThemeBg, string>;
 		this.#hexBgColors = {} as Record<ThemeBg, string>;
 		for (const [key, value] of Object.entries(bgColors) as [ThemeBg, string | number][]) {
@@ -220,6 +243,8 @@ export class Theme {
 				logger.debug("Invalid symbol key in override", { key, availableKeys: Object.keys(this.#symbols) });
 			}
 		}
+		// `status.done` aliases `status.success` unless a theme overrides it explicitly.
+		if (!("status.done" in symbolOverrides)) this.#symbols["status.done"] = this.#symbols["status.success"];
 		this.#spinnerFramesOverrides = spinnerFramesOverrides;
 	}
 
@@ -322,10 +347,21 @@ export class Theme {
 		return this.#sessionAccentInputs;
 	}
 
+	/**
+	 * True when the theme paints `color` with a real foreground — i.e. the token
+	 * exists and is not the empty string (terminal default, `\x1b[39m`). Optional
+	 * tokens absent from the theme JSON are also false. Callers use this to keep
+	 * terminal-default behavior byte-for-byte when an optional token is unset.
+	 */
+	hasColor(color: ThemeColor): boolean {
+		const ansi = this.#fgColors[color];
+		return ansi !== undefined && ansi !== "\x1b[39m";
+	}
+
 	fg(color: ThemeColor, text: string): string {
 		const ansi = this.#fgColors[color];
 		if (!ansi) throw new Error(`Unknown theme color: ${color}`);
-		return `${ansi}${text}\x1b[39m`; // Reset only foreground color
+		return wrapForeground(ansi, text);
 	}
 
 	/** Apply a foreground, replacing terminal-default tokens with the theme's contrast-safe fallback. */
@@ -337,7 +373,7 @@ export class Theme {
 			resolved = ansi === "\x1b[39m" ? colorToAnsi(this.getColorHex(color), this.mode) : ansi;
 			this.#resolvedFgColors.set(color, resolved);
 		}
-		return `${resolved}${text.replace(FOREGROUND_RESET_PATTERN, `$&${resolved}`)}\x1b[39m`;
+		return wrapForeground(resolved, text);
 	}
 
 	bg(color: ThemeBg, text: string): string {
@@ -365,7 +401,7 @@ export class Theme {
 	 */
 	fgOnBg(color: ThemeColor, background: ThemeBg, text: string): string {
 		const ansi = this.getFgOnBgAnsi(color, background);
-		return `${ansi}${text.replace(FOREGROUND_RESET_PATTERN, `$&${ansi}`)}\x1b[39m`;
+		return wrapForeground(ansi, text);
 	}
 
 	bold(text: string): string {
@@ -494,6 +530,7 @@ export class Theme {
 			running: this.#symbols["status.running"],
 			shadowed: this.#symbols["status.shadowed"],
 			aborted: this.#symbols["status.aborted"],
+			/** @deprecated Alias of `success`. */
 			done: this.#symbols["status.done"],
 		};
 	}
@@ -704,6 +741,7 @@ export class Theme {
 			jobs: this.#symbols["icon.job"],
 			gauge: this.#symbols["icon.throughput"],
 			context: this.#symbols["icon.context"],
+			ghost: this.#symbols["icon.ghost"],
 			agents: this.#symbols["icon.agents"],
 			branch: this.#symbols["icon.branch"],
 			tree: this.#symbols["icon.worktree"],

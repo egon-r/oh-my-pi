@@ -2,19 +2,23 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
+import { type OAuthAccountPools, validateAgentAccountPools } from "../config/account-pools";
 import {
 	type AgentCompactionThresholdOverride,
 	validateAgentCompactionThresholdOverrides,
 } from "../config/compaction-threshold";
 import { effect, register } from "../config/registry";
+import type { Settings } from "../config/settings";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
-import { logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
 import { setFeedModelBadgeEnabled } from "@oh-my-pi/pi-tui/render/render-utils";
 import { getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 
 const EMPTY_AGENT_SERVICE_TIER_OVERRIDES: Record<string, ServiceTierInheritSettingValue> = {};
 const EMPTY_AGENT_COMPACTION_THRESHOLD_OVERRIDES: Record<string, AgentCompactionThresholdOverride> = {};
+const EMPTY_AGENT_ACCOUNT_POOLS: Record<string, OAuthAccountPools> = {};
+const EMPTY_AGENT_SOFT_REQUEST_BUDGET: Record<string, number | null> = {};
 
 const DEFAULT_AGENT_MODEL_OVERRIDES: Record<string, string | string[]> = {};
 
@@ -28,8 +32,8 @@ export const cfgTaskIsolationEnabled = register({
 	ui: {
 		tab: "tasks",
 		group: "Isolation",
-		label: "Isolate Subagents",
-		description: "Run subagents in an isolated copy of the checkout and integrate their changes afterwards",
+		label: "Allow Isolated Subagents",
+		description: "Allow per-task isolation with `isolated: true`; tasks without it run in the shared checkout",
 	},
 });
 
@@ -95,6 +99,49 @@ export const cfgWorktreeCleanSource = register({
 		label: "Clean Source Checkout on /wt",
 		description:
 			"When creating a worktree with `/wt`, reset tracked changes and remove untracked files from the original checkout after carrying them over",
+	},
+});
+
+export const cfgWorktreeOnStart = register({
+	id: "worktree.onStart",
+	protocolDefault: ["rpc", "acp"],
+	type: "enum",
+	values: ["off", "ask", "create"] as const,
+	default: "off",
+	ui: {
+		tab: "tasks",
+		group: "Isolation",
+		label: "Worktree on Start",
+		description: "Whether fresh interactive sessions start in a new linked worktree",
+		options: [
+			{ value: "off", label: "Off", description: "Start in the current checkout" },
+			{ value: "ask", label: "Ask", description: "Ask at session start" },
+			{ value: "create", label: "Create", description: "Always start in a new worktree on a `wt/*` branch" },
+		],
+	},
+});
+
+export const cfgWorktreeOnExit = register({
+	id: "worktree.onExit",
+	protocolDefault: ["rpc", "acp"],
+	type: "enum",
+	values: ["keep", "ask", "remove"] as const,
+	default: "keep",
+	ui: {
+		tab: "tasks",
+		group: "Isolation",
+		label: "Worktree on Exit",
+		description: "What to do on exit with worktrees created since omp started (on start or with `/wt`)",
+		options: [
+			{ value: "keep", label: "Keep", description: "Leave worktrees in place" },
+			{ value: "ask", label: "Ask", description: "Ask on exit" },
+			{
+				value: "remove",
+				label: "Remove",
+				description:
+					"Remove clean worktrees; ask when they have uncommitted changes or new commits. Gitignored files (e.g. `.env`) are deleted too",
+			},
+		],
 	},
 });
 
@@ -206,6 +253,32 @@ export const cfgTaskBatch = register({
 	},
 });
 
+export const cfgTaskFile = register({
+	id: "task.file",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Task Instructions from Files",
+		description:
+			"Let the task tool read subagent instructions from a file (taskFile), recording its path and SHA-256.",
+	},
+});
+
+export const cfgTaskStructured = register({
+	id: "task.structured",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Structured Task Results",
+		description:
+			"Expose outputSchema/schemaMode on the task tool and return subagent results through the yield tool, validated against caller or agent output schemas. Off: task subagents have no yield tool and return their final message as plain text, except agents whose definition sets structured: true. Eval agent()/workpool spawns always keep structured results.",
+	},
+});
+
 export const cfgTaskSpeculativeLaunch = register({
 	id: "task.speculativeLaunch",
 	type: "boolean",
@@ -229,6 +302,73 @@ export const cfgTaskEnableEffort = register({
 		label: "Per-Task Effort",
 		description:
 			"Expose the optional effort parameter on task spawns, allowing callers to override each subagent's thinking level",
+	},
+});
+
+export const cfgTaskPerCallModel = register({
+	id: "task.perCallModel",
+	type: "enum",
+	values: ["off", "eval", "on"] as const,
+	default: "off",
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Per-Call Model",
+		description:
+			"Whether a subagent call may pick its model with one exact provider/model-id[@upstream][:level] selector. An @upstream pin is part of the model identity and is supported only by aggregators. Only models the configuration already routes to are accepted. Project settings can turn it off but not on, and never approve a model.",
+		options: [
+			{ value: "off", label: "Off", description: "Reject `model` on task items and eval agent()/workpool()" },
+			{ value: "eval", label: "Eval only", description: "Accept `model` in eval agent() and workpool() only" },
+			{ value: "on", label: "On", description: "Accept `model` on task items and in eval agent()/workpool()" },
+		],
+	},
+});
+
+/**
+ * Whether `task.perCallModel` accepts a per-call `model` for this invocation kind. The operator's
+ * layers ({@link Settings.grantAuthority}) must enable it; project and subagent-injected settings,
+ * which the live merged value includes, can only turn it off.
+ */
+export function perCallModelEnabled(settings: Settings, invocationKind: "task" | "eval"): boolean {
+	return [settings.grantAuthority(), settings].every(layers => {
+		const mode = cfgTaskPerCallModel.get(layers);
+		return mode === "on" || (mode === "eval" && invocationKind === "eval");
+	});
+}
+
+/**
+ * Validates `task.perCallModelAllow`: a list of exact `provider/model-id` strings. A non-string
+ * entry fails load and writes instead of reaching approval as an entry that matches nothing.
+ */
+function validatePerCallModelAllow(value: unknown): void {
+	if (value === undefined || value === null) return;
+	if (!Array.isArray(value)) {
+		throw new Error(
+			`Invalid task.perCallModelAllow: expected a list of provider/model-id strings, got ${Bun.inspect(value)}.`,
+		);
+	}
+	for (const [index, entry] of value.entries()) {
+		if (typeof entry === "string") continue;
+		throw new Error(
+			`Invalid task.perCallModelAllow[${index}]: expected a provider/model-id string, got ${Bun.inspect(entry)}.`,
+		);
+	}
+}
+
+export const cfgTaskPerCallModelAllow = register({
+	id: "task.perCallModelAllow",
+	type: "array",
+	default: [] as string[],
+	validate: validatePerCallModelAllow,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Per-Call Model Allowlist",
+		editor: "json",
+		// The editor writes the global layer; hide a project-supplied list so the repository cannot promote it.
+		condition: "perCallModelAllowNotProject",
+		description:
+			"Exact selectors: `provider/model-id`, including `@upstream` only for a pinned OpenRouter/Vercel route (e.g. `openrouter/x@y`). When set, a per-call model must also be listed here. Empty: every model the configuration grants. A project list can only narrow this one.",
 	},
 });
 
@@ -308,22 +448,16 @@ export const cfgTaskMaxRuntimeMs = register({
 	},
 });
 
-export const cfgTaskCompletionProbeMs = register({
-	id: "task.completionProbeMs",
-	type: "number",
-	default: 120_000,
+export const cfgTaskCompletionProbe = register({
+	id: "task.completionProbe",
+	type: "boolean",
+	default: true,
 	ui: {
 		tab: "tasks",
 		group: "Subagents",
 		label: "Subagent Completion Probe",
 		description:
-			"How often (ms) a working subagent is asked, through a cached side request like /btw, to estimate how complete its task is. The estimate shows next to the subagent in wait and task views. 0 disables it.",
-		options: [
-			{ value: "0", label: "Disabled" },
-			{ value: "120000", label: "2 minutes", description: "Default" },
-			{ value: "300000", label: "5 minutes" },
-			{ value: "600000", label: "10 minutes" },
-		],
+			"Ask a working subagent, through a cached side request like /btw, to estimate how complete its task is: after 2, 5, 10 and 30 more minutes, then hourly. The estimate shows next to the subagent in wait and task views. Only subagents spawned by the main agent of an interactive session are asked; print, RPC, ACP and SDK runs never probe.",
 	},
 });
 
@@ -349,7 +483,7 @@ export const cfgTaskSoftRequestBudget = register({
 		group: "Subagents",
 		label: "Soft Subagent Request Budget",
 		description:
-			"Soft per-subagent request budget (assistant requests per run). Crossing it injects a wrap-up steering notice (see task.softRequestBudgetNotice); at 1.5x the budget the run is force-stopped and the agent must yield its partial findings. 0 disables the guard. Bundled scout/sonic agents cap out at a lower built-in budget, so a value below that cap still applies to them.",
+			"Soft per-subagent request budget (assistant requests per run). Crossing it injects a wrap-up steering notice (see task.softRequestBudgetNotice); at 1.5x the budget the run is force-stopped and the agent must hand back its partial findings. 0 disables the guard. Bundled scout/sonic agents cap out at a lower built-in budget, so a value below that cap still applies to them. A task.agentSoftRequestBudget entry replaces this budget for the agent it names.",
 		options: [
 			{ value: "0", label: "Disabled" },
 			{ value: "90", label: "90 requests" },
@@ -357,6 +491,34 @@ export const cfgTaskSoftRequestBudget = register({
 			{ value: "200", label: "200 requests", description: "Default" },
 		],
 	},
+});
+
+/**
+ * Validates `task.agentSoftRequestBudget`: exact agent name → request budget,
+ * a non-negative integer (0 disables that agent's guard). A `null` entry clears
+ * one inherited from a lower-priority settings layer.
+ */
+function validateAgentSoftRequestBudget(value: unknown): void {
+	if (value === undefined || value === null) return;
+	if (!isRecord(value)) {
+		const received = Array.isArray(value) ? "an array" : `a ${typeof value}`;
+		throw new Error(
+			`Invalid task.agentSoftRequestBudget: expected a map of agent name to request budget, got ${received}.`,
+		);
+	}
+	for (const [agentName, budget] of Object.entries(value)) {
+		if (budget === null || (typeof budget === "number" && Number.isSafeInteger(budget) && budget >= 0)) continue;
+		throw new Error(
+			`Invalid task.agentSoftRequestBudget.${agentName}: expected a non-negative integer request count (0 disables the guard), got ${Bun.inspect(budget)}.`,
+		);
+	}
+}
+
+export const cfgTaskAgentSoftRequestBudget = register({
+	id: "task.agentSoftRequestBudget",
+	type: "record",
+	default: EMPTY_AGENT_SOFT_REQUEST_BUDGET,
+	validate: validateAgentSoftRequestBudget,
 });
 
 export const cfgTaskSoftRequestBudgetNotice = register({
@@ -382,7 +544,7 @@ export const cfgTaskMaxEffort = register({
 		group: "Subagents",
 		label: "Maximum Per-Spawn Effort",
 		description:
-			"Maximum reasoning effort allowed for the task tool's per-spawn effort hint. Lower values prevent callers from escalating subagents above this ceiling; the default preserves the model's full range.",
+			"Maximum reasoning effort allowed for the task tool's per-spawn effort hint or a per-call model. An explicit `:level` is clamped to the highest supported effort at or below this ceiling, and an omitted `:level` inherits the agent's thinking level capped at this value; cold revival re-applies the cap. Unset, `:inherit` and `:off` keep their existing meaning. A per-call model must support an effort at or below this ceiling; the default preserves the model's full range.",
 		options: THINKING_EFFORTS.map(getThinkingLevelMetadata),
 	},
 });
@@ -415,6 +577,14 @@ export const cfgTaskAgentCompactionThresholdOverrides = register({
 	type: "record",
 	default: EMPTY_AGENT_COMPACTION_THRESHOLD_OVERRIDES,
 	validate: validateAgentCompactionThresholdOverrides,
+});
+
+export const cfgTaskAgentAccountPools = register({
+	id: "task.agentAccountPools",
+	protocolDefault: ["rpc", "acp"],
+	type: "record",
+	default: EMPTY_AGENT_ACCOUNT_POOLS,
+	validate: validateAgentAccountPools,
 });
 
 export const cfgTaskAgentPrewalk = register({
