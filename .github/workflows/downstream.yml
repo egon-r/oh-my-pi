@@ -1,0 +1,99 @@
+name: Egon OMP
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*-egon.*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: egon-omp-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    # Standard hosted runners are free for public repositories. Do not silently
+    # spend private-repository minutes if visibility changes in the future.
+    if: github.event.repository.private == false
+    runs-on: macos-26
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - name: Install locked dependencies without publish or prepare hooks
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Read and check downstream version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          version="$(cat downstream-version.txt)"
+          if [[ "$IS_TAG" == true && "$RELEASE_TAG" != "v$version" ]]; then
+            echo "Release tag does not match downstream-version.txt" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Build signed standalone archive and checksum
+        run: bun scripts/build-downstream.ts
+      - name: Run behavioral regressions
+        run: bun test packages/coding-agent/test/judgment-chain.test.ts
+      - name: Check TypeScript contracts
+        run: bun run --cwd packages/coding-agent check:types
+      - name: Smoke-test packaged binary
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cd dist
+          shasum -a 256 -c SHA256SUMS
+          python3 ../scripts/check-downstream-archive.py omp-macos-arm64.tar.gz
+          mkdir "$RUNNER_TEMP/omp-smoke"
+          tar -xzf omp-macos-arm64.tar.gz -C "$RUNNER_TEMP/omp-smoke"
+          "$RUNNER_TEMP/omp-smoke/bin/omp" --version | grep -F -- "$EXPECTED_VERSION"
+          "$RUNNER_TEMP/omp-smoke/bin/omp" --help > /dev/null
+          codesign --verify --strict "$RUNNER_TEMP/omp-smoke/bin/omp"
+          "$RUNNER_TEMP/omp-smoke/bin/omp" --smoke-test
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: omp-macos-arm64
+          path: |
+            dist/omp-macos-arm64.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 3
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-egon.')
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: omp-macos-arm64
+          path: dist
+      - name: Publish tagged binary release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            dist/omp-macos-arm64.tar.gz dist/SHA256SUMS \
+            --verify-tag --latest \
+            --title "OMP $RELEASE_VERSION (egon-r)" \
+            --notes "Custom egon-r downstream. macOS Apple Silicon standalone binary, ad-hoc signed. SHA-256 checksums attached. Install with mise github:egon-r/oh-my-pi or Homebrew egon-r/tap/omp-egon. Other platforms are not built by this workflow."

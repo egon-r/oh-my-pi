@@ -1,3 +1,5 @@
+> **egon-r maintained fork:** see [DOWNSTREAM.md](DOWNSTREAM.md) for this fork's versions, mise/Homebrew installation, public binary releases, and CI. Upstream compatibility is not guaranteed. Use this fork's release channel rather than the upstream installer described below.
+
 <p align="center">
   <img src="https://github.com/can1357/oh-my-pi/blob/main/assets/hero.png?raw=true" alt="omp">
 </p>
