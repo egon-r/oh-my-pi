@@ -59,7 +59,7 @@ git push origin v18.16.0-egon.1
 
 `.github/workflows/downstream.yml` builds and smoke-tests on main pushes, pull requests, and manual dispatch. Matching `v*-egon.*` tags publish the verified binary and checksum as a GitHub Release. A mismatched tag/version fails before building. Release publishing uses only GitHub's short-lived repository token; it does not need npm, cloud-storage, signing-account, or cross-repository credentials.
 
-Standard hosted macOS and Ubuntu runners are free while this repository is public. The build job explicitly refuses private repositories rather than silently consuming private-repository minutes. Build artifacts expire after three days; tagged release assets remain available. No paid/self-hosted runner is required.
+Standard hosted macOS and Ubuntu runners are free while this repository is public. The build job explicitly refuses private repositories rather than silently consuming private-repository minutes. Only tagged builds upload temporary Actions artifacts, retained for one day to limit storage use; tagged release assets remain available. Main/PR builds upload no artifacts. No paid/self-hosted runner is required.
 
 The inherited `CI`, `OMP Nix`, and `Warm bun store cache` workflows are disabled in this repository's Actions settings. Keep them disabled: they belong to upstream's larger infrastructure and publishing setup. The dedicated `Egon OMP` workflow is the maintained downstream path.
 
