@@ -187,7 +187,7 @@ export class HindsightRetainQueue {
 					{ scope: "project" as const, tags: projectTags, items: projectItems },
 					{ scope: "global" as const, tags: undefined, items: globalItems },
 				]
-			: [{ scope: undefined, tags: projectTags, items: projectItems.length > 0 ? projectItems : globalItems }];
+			: [{ scope: undefined, tags: projectTags, items }];
 		// Results keep group order, so a combined notice always lists project items before global ones.
 		const results = await Promise.all(
 			groups
@@ -195,9 +195,10 @@ export class HindsightRetainQueue {
 				.map(async (group): Promise<RetainFailure | undefined> => {
 					try {
 						const batch: MemoryItemInput[] = group.items.map(item => {
-							// Explicit tool-item tags replace the session defaults for that item; a tagged batch
+							// Explicit tool-item tags replace the session defaults for that item; global items
+							// always stay untagged so every project's recall surfaces them. A tagged batch
 							// combines observation scopes so every item stays discoverable under all of its tags.
-							const tags = item.tags ?? group.tags;
+							const tags = item.scope === "global" ? undefined : (item.tags ?? group.tags);
 							return {
 								content: item.content,
 								context: item.context ?? state.config.retainContext,

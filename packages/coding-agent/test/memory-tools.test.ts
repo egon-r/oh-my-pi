@@ -410,7 +410,7 @@ describe("retain.execute", () => {
 			const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
 			registerState(client, undefined, { config });
 
-			expect(() => registeredState!.retainQueue.enqueue("cross-project fact", undefined, "global")).toThrow(error);
+			expect(() => registeredState!.retainQueue.enqueue("cross-project fact", undefined, undefined, "global")).toThrow(error);
 			expect(registeredState?.retainQueue.depth).toBe(0);
 		},
 	);
