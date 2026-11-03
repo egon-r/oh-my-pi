@@ -240,6 +240,93 @@ afterEach(() => {
 });
 
 describe("ChainJudge", () => {
+	it("does not leak a failed local judgment to the session model with an explicit empty fallback chain", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: `${LOCAL.provider}/${LOCAL.id}` },
+			"retry.fallbackChains": { judge: [] },
+		});
+		vi.spyOn(tinyModelClient, "complete").mockResolvedValue("unparseable");
+		const online = vi.spyOn(ai, "completeSimple");
+		const registry = makeRegistry([LOCAL, ONLINE], { [ONLINE.provider]: "online-key" });
+
+		await expect(
+			new ChainJudge({ settings, registry, purpose: "test", sessionModel: ONLINE }).judge({
+				state: "unfinished work",
+				questions: { tier: TIER_QUESTION },
+			}),
+		).rejects.toThrow("every judge candidate failed");
+		expect(online).not.toHaveBeenCalled();
+	});
+
+	it("answers mixed local questions under their original IDs from keyword-only completions", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: `${LOCAL.provider}/${LOCAL.id}` },
+			"retry.fallbackChains": { judge: [] },
+		});
+		vi.spyOn(tinyModelClient, "complete")
+			.mockResolvedValueOnce("high")
+			.mockResolvedValueOnce("no")
+			.mockResolvedValueOnce("2");
+
+		const result = await new ChainJudge({ settings, registry: makeRegistry([LOCAL]), purpose: "test" }).judge({
+			state: "The scheduler refactor is complex and has not been verified.",
+			questions: {
+				"reasoning/tier": TIER_QUESTION,
+				verified: { type: "noul", instructions: "Has verification succeeded?" },
+				complexity: { type: "score", instructions: "Rate complexity.", criteria: ["trivial", "moderate", "hard"] },
+			},
+		});
+
+		expect(result.answers).toEqual({
+			"reasoning/tier": {
+				type: "choice",
+				choice: "high",
+				probabilities: { low: 0, high: 1 },
+				confidence: 1,
+			},
+			verified: { type: "noul", noul: 0 },
+			complexity: { type: "score", score: 2, probabilities: { "0": 0, "1": 0, "2": 1 }, confidence: 1 },
+		});
+	});
+
+	it("rejects a local batch rather than returning partial answers when a later question fails", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: `${LOCAL.provider}/${LOCAL.id}` },
+			"retry.fallbackChains": { judge: [] },
+		});
+		vi.spyOn(tinyModelClient, "complete").mockResolvedValueOnce("high").mockResolvedValueOnce("unknown");
+
+		await expect(
+			new ChainJudge({ settings, registry: makeRegistry([LOCAL]), purpose: "test" }).judge({
+				state: "unfinished work",
+				questions: {
+					tier: TIER_QUESTION,
+					verified: { type: "noul", instructions: "Has verification succeeded?" },
+				},
+			}),
+		).rejects.toThrow('judgment "verified"');
+	});
+
+	it("honors cancellation between local questions without returning partial answers", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: `${LOCAL.provider}/${LOCAL.id}` },
+			"retry.fallbackChains": { judge: [] },
+		});
+		const controller = new AbortController();
+		const reason = new Error("stop local judgment");
+		vi.spyOn(tinyModelClient, "complete").mockImplementation(async () => {
+			controller.abort(reason);
+			return "high";
+		});
+
+		await expect(
+			new ChainJudge({ settings, registry: makeRegistry([LOCAL]), purpose: "test" }).judge(
+				{ state: "unfinished work", questions: { first: TIER_QUESTION, second: TIER_QUESTION } },
+				{ signal: controller.signal },
+			),
+		).rejects.toBe(reason);
+	});
+
 	it("falls from a coarse local question to a tiered online question", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: `${LOCAL.provider}/${LOCAL.id}` },

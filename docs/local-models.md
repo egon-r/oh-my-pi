@@ -26,6 +26,44 @@ Inspect the catalog with `omp models --kind tiny`, `omp models --kind tts`, and 
 
 The tiny-model CLI and source registry retain **title** and **memory** groupings because those are the workloads used to benchmark and recommend model sizes. They are not runtime model classes: every entry in both groups has catalog kind `tiny`, and any compatible entry can be assigned to `tiny`, `memory`, or `judge`. Choose based on quality and resource needs rather than the CLI grouping alone.
 
+## Opt-in local judgments
+
+Keep local judgment experiments out of the global role assignment. Pass a config overlay with `--config /path/to/local-judge.yml`:
+
+```yaml
+modelRoles:
+   judge: local/qwen3-1.7b
+retry:
+   fallbackChains:
+      judge: []
+providers:
+   tinyModelDevice: mlx
+```
+
+MLX requires Apple silicon. Other platforms can select an ONNX-compatible model and omit the device setting. Download weights before evaluating latency. A config overlay changes only that invocation; use a separate `--profile` as well when testing a development build against isolated auth/session databases.
+
+Local multi-question requests run one inference per question, in order, and retain the caller's question IDs in code. This avoids requiring small models to emit exact named-answer lines. Cancellation stops remaining questions; an error rejects the request instead of returning partial answers. An explicit empty `judge` fallback chain also prevents implicit fallback to the session's remote model. Configured nonempty fallback chains retain their normal behavior.
+
+Local judgments support text choice, yes/no, and ordinal score questions, not image or box judgments. Their probability/confidence fields are one-hot encodings of parsed keywords, **not calibrated confidence estimates**.
+
+Run the credential-free, local-only smoke corpus from the repository root:
+
+```sh
+PI_TINY_DEVICE=mlx bun packages/coding-agent/bench/local-judge.ts
+```
+
+The optional positional argument chooses another `local/<model>` selector. The runner uses isolated settings, in-memory auth, no session model, and an empty fallback chain; it never loads provider credentials. It prints each expected/actual answer and a final summary. The hand-authored cases are not a representative quality benchmark.
+
+Observed on a 16 GB Apple-silicon host (2026-11-03), Qwen3 1.7B/MLX answered all 28 multi-question cases without a transport or parse error:
+
+| Workload | Correct answers | Total answers |
+| --- | ---: | ---: |
+| Completion and verification | 30 | 36 |
+| File relevance and state mutation | 9 | 16 |
+| Reasoning effort and design needs | 11 | 16 |
+
+The 68 answers took 76.9 seconds in total, including startup; the first three-question case took 6.1 seconds. Critically, some failed or missing verification was classified as successful, and irrelevant files were accepted. Inspecting one failed-verification case showed a raw `YES`, so fixing output formatting does not fix semantic judgment quality. These results do **not** justify replacing Jev globally or relying on this local model to certify completion, filter searches, or downgrade reasoning effort.
+
 ## Runtime / environment findings
 
 - **Text/Whisper stack**: `@huggingface/transformers` (transformers.js) v4 running in a Bun

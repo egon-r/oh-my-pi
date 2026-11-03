@@ -60,6 +60,7 @@ import { roleCandidatePool } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import type { CostGate } from "../session/cost-gate";
 import type { SessionManager } from "../session/session-manager";
+import { cfgRetryFallbackChains } from "../session/settings";
 import { getTinyLocalModelSpec } from "../tiny/models";
 import localPromptTemplate from "../prompts/system/judgment-local.md" with { type: "text" };
 import { tinyModelClient } from "../tiny/title-client";
@@ -579,7 +580,10 @@ export class ChainJudge implements Judge {
 	}
 
 	#resolveCandidates(request?: JudgmentRequest): RoleChainCandidate[] {
-		const { settings, registry, sessionModel } = this.#deps;
+		const { settings, registry } = this.#deps;
+		// An explicit empty chain is an opt-out from implicit remote/session fallback.
+		const sessionModel =
+			cfgRetryFallbackChains.get(settings).judge?.length === 0 ? undefined : this.#deps.sessionModel;
 		const { roleChain, list: chain } = cachedJudgeRoleChain(settings, registry);
 		const images = request?.images ?? [];
 		// A prompted model cannot locate anything, so no session fallback either.
@@ -597,7 +601,7 @@ export class ChainJudge implements Judge {
 
 	async #createJudge(candidate: RoleChainCandidate, signal: AbortSignal | undefined): Promise<Judge | undefined> {
 		const model = candidate.model;
-		if (model.api === "local-inference") return new TextJudge(new LocalTextBackend(model.id));
+		if (model.api === "local-inference") return new LocalJudge(model.id);
 		if (!(await this.#deps.registry.getApiKey(model, this.#deps.sessionId, { signal }))) return undefined;
 		const apiKey = this.#deps.registry.resolver(model, this.#deps.sessionId);
 		if (isJudgmentApi(model.api)) {
@@ -629,6 +633,42 @@ export class ChainJudge implements Judge {
 				}),
 		});
 		return new TextJudge(backend);
+	}
+}
+
+/**
+ * Small local models reliably emit one keyword, not a map of named answers.
+ * Keep question IDs in code and classify each question independently instead
+ * of asking the worker to reproduce the multi-question wire format.
+ */
+class LocalJudge extends TextJudge {
+	readonly #modelId: string;
+
+	constructor(modelId: string) {
+		super(new LocalTextBackend(modelId));
+		this.#modelId = modelId;
+	}
+
+	override async judge<Q extends Questions>(
+		request: JudgmentRequest<Q>,
+		options: JudgeOptions = {},
+	): Promise<JudgmentResult<Q>> {
+		const ids = Object.keys(request.questions);
+		if (ids.length <= 1) return super.judge(request, options);
+
+		const answers = {} as JudgmentResult<Q>["answers"];
+		for (const id of ids) {
+			options.signal?.throwIfAborted();
+			const result = await super.judge({ ...request, questions: { [id]: request.questions[id] } }, options);
+			Object.assign(answers, result.answers);
+		}
+		return {
+			api: "local-inference",
+			provider: "local",
+			model: this.#modelId,
+			answers,
+			usage: tokenUsage(0, 0),
+		};
 	}
 }
 
