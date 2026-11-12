@@ -147,7 +147,7 @@ jobs:
           cat dist/SHA256SUMS dist-linux/SHA256SUMS > dist/SHA256SUMS.combined
           mv dist/SHA256SUMS.combined dist/SHA256SUMS
           gh release create "$RELEASE_TAG" \
-            dist/omp-macos-arm64.tar.gz dist/omp-linux-x64 dist/SHA256SUMS \
+            dist/omp-macos-arm64.tar.gz dist-linux/omp-linux-x64 dist/SHA256SUMS \
             --verify-tag --latest \
             --title "OMP $RELEASE_VERSION (egon-r)" \
             --notes "Custom egon-r downstream. macOS Apple Silicon standalone binary, ad-hoc signed; Linux x64 standalone binary, unsigned. SHA-256 checksums attached for both artifacts. Install with mise github:egon-r/oh-my-pi or Homebrew egon-r/tap/omp-egon."
