@@ -146,7 +146,7 @@ describe("formatTaskResultSummary", () => {
 
 	it("surfaces the resolved model in the envelope and omits it when unresolved", () => {
 		const withModel = formatTaskResultSummary(
-			{ ...settledResult("ok"), resolvedModel: "zhipu-coding-plan/glm-5.3-flash", resolvedThinkingLevel: "low" },
+			{ ...settledResult("ok"), resolvedModel: "zhipu-coding-plan/glm-5.3-flash" },
 			{ totalDurationMs: 5 },
 		);
 		expect(withModel).toContain(
