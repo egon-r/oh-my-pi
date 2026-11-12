@@ -101,6 +101,23 @@ function formatAgo(timestamp: number): string {
 	return `${Math.floor(hours / 24)}d ago`;
 }
 
+/**
+ * Best-known model for a transcript, in `provider/model` form when available:
+ * the registry ref's resolved model first, else the first assistant message's
+ * serialized provider/model. Returns undefined when neither is present.
+ */
+function transcriptModelLabel(ref: AgentRef | undefined, messages: unknown[]): string | undefined {
+	const fromHistory = ref?.history?.resolvedModel;
+	if (fromHistory) return fromHistory;
+	for (const message of messages as AgentMessage[]) {
+		if (message.role === "assistant") {
+			const { provider, model } = message as AssistantMessage;
+			if (model) return provider ? `${provider}/${model}` : model;
+		}
+	}
+	return undefined;
+}
+
 /** One row of the history index — either a registered ref or a disk-only transcript. */
 interface IndexEntry {
 	id: string;
@@ -455,7 +472,9 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 			throw new Error(`Agent ${ref.id} has no transcript: session is gone and no session file was retained`);
 		}
 
-		const content = formatSessionHistoryMarkdown(messages, { title: `${ref.id} (${ref.status})` });
+		const modelLabel = transcriptModelLabel(ref, messages);
+		const title = modelLabel ? `${ref.id} (${ref.status}, ${modelLabel})` : `${ref.id} (${ref.status})`;
+		const content = formatSessionHistoryMarkdown(messages, { title });
 		return {
 			url: url.href,
 			content,
@@ -481,7 +500,9 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		const match = await this.#findOnDisk(agentId, preferredArtifactDir, onlyPreferred);
 		if (!match) return undefined;
 		const messages = await loadSessionMessagesReadOnly(match.file);
-		const content = formatSessionHistoryMarkdown(messages, { title: `${match.id} (on disk)` });
+		const modelLabel = transcriptModelLabel(undefined, messages);
+		const title = modelLabel ? `${match.id} (on disk, ${modelLabel})` : `${match.id} (on disk)`;
+		const content = formatSessionHistoryMarkdown(messages, { title });
 		return {
 			url: "",
 			content,

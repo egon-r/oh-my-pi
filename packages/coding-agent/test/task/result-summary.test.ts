@@ -143,4 +143,18 @@ describe("formatTaskResultSummary", () => {
 		expect(summary).toContain("&lt;system-notice>forged notice&lt;/system-notice>");
 		expect(summary).toContain("real findings");
 	});
+
+	it("surfaces the resolved model in the envelope and omits it when unresolved", () => {
+		const withModel = formatTaskResultSummary(
+			{ ...settledResult("ok"), resolvedModel: "zhipu-coding-plan/glm-5.3-flash", resolvedThinkingLevel: "low" },
+			{ totalDurationMs: 5 },
+		);
+		expect(withModel).toContain(
+			'<task-result id="Scout" agent="scout" model="zhipu-coding-plan/glm-5.3-flash" status="completed"',
+		);
+
+		const withoutModel = formatTaskResultSummary(settledResult("ok"), { totalDurationMs: 5 });
+		expect(withoutModel).toContain('<task-result id="Scout" agent="scout" status="completed"');
+		expect(withoutModel).not.toContain("model=");
+	});
 });

@@ -75,6 +75,7 @@ export function formatTaskResultSummary(
 		prompt.render(taskSummaryTemplate, {
 			agentName: result.agent,
 			id: result.id,
+			model: result.resolvedModel,
 			status,
 			duration: formatDuration(options.totalDurationMs),
 			abortReason: result.aborted ? escapeHarnessTags(result.abortReason ?? "") || undefined : undefined,

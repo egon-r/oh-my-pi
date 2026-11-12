@@ -461,7 +461,7 @@ describe("history:// protocol", () => {
 
 			const resource = await InternalUrlRouter.instance().resolve("history://Sleeper");
 
-			expect(resource.content).toContain("# Sleeper (parked)");
+			expect(resource.content).toContain("# Sleeper (parked, anthropic/test-model)");
 			expect(resource.content).toContain("parked hello");
 			expect(resource.content).toContain("parked reply");
 			expect(resource.sourcePath).toBe(sessionFile);
@@ -613,7 +613,7 @@ describe("history:// protocol", () => {
 			});
 
 			const resource = await InternalUrlRouter.instance().resolve("history://Sub1");
-			expect(resource.content).toContain("# Sub1 (on disk)");
+			expect(resource.content).toContain("# Sub1 (on disk, anthropic/test-model)");
 			expect(resource.content).toContain("parked hello");
 			expect(resource.sourcePath).toBe(path.join(artifactsDir, "Sub1.jsonl"));
 			expect(resource.notes?.join("\n")).toContain("unregistered");
@@ -639,7 +639,7 @@ describe("history:// protocol", () => {
 			});
 
 			const resource = await InternalUrlRouter.instance().resolve("history://authloader");
-			expect(resource.content).toContain("# AuthLoader (on disk)");
+			expect(resource.content).toContain("# AuthLoader (on disk, anthropic/test-model)");
 		});
 	});
 
@@ -693,7 +693,7 @@ describe("history:// protocol", () => {
 			});
 
 			const resource = await InternalUrlRouter.instance().resolve("history://Parent.Child");
-			expect(resource.content).toContain("# Parent.Child (on disk)");
+			expect(resource.content).toContain("# Parent.Child (on disk, anthropic/test-model)");
 		});
 	});
 
