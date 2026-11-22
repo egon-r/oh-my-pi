@@ -4,8 +4,10 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
+import { RecapNotice } from "@oh-my-pi/pi-tui/chat/recap-notice";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { QueuedMessagesBand } from "@oh-my-pi/pi-tui/prompt/queued-messages";
+import { previewLine, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AdvisorMessageDetails } from "../../advisor";
 import { InternalUrlRouter } from "../../internal-urls";
@@ -42,6 +44,7 @@ import { ReplyWriteComponent, replyDisplayMessage, toolResultReplies } from "@oh
 import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StrippedToolCallsPlaceholder } from "@oh-my-pi/pi-tui/chat/stripped-tool-calls-placeholder";
 import { imageContent, textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import { messageBlock, PresentedBlock } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import { ToolActivityContainer } from "@oh-my-pi/pi-tui/chrome/tool-activity";
 import {
 	isSettledJobFrame,
@@ -54,7 +57,7 @@ import {
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { noticeRow, TranscriptNotice } from "@oh-my-pi/pi-tui/chrome/transcript-notice";
 import { span } from "@oh-my-pi/pi-tui/native/describe";
-import { createUsageRowBlock, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
+import { createUsageRowBlock, TurnUsageTally, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/controllers/tool-args-reveal";
 import { createToolCallBlock } from "../../modes/controllers/tool-call-block";
@@ -68,10 +71,12 @@ import { theme } from "@oh-my-pi/pi-tui/theme";
 import type {
 	CompactionQueuedMessage,
 	InteractiveModeContext,
+	RenderInitialMessagesOptions,
 	RenderSessionContextOptions,
 	ShowStatusOptions,
 } from "../../modes/types";
 import { extractVisibleAssistantText } from "../rpc/rpc-live";
+import { ASYNC_NOTIFY_MESSAGE_TYPE } from "@oh-my-pi/pi-tui/chat/messages";
 import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "../../session/launch-completion";
 import {
 	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
@@ -82,6 +87,7 @@ import {
 	type SkillPromptDetails,
 } from "../../session/messages";
 import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
+import { listSessionRecaps } from "../../session/session-index";
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { buildSkillCommandPrompt, invokeSkillCommandFromText, isKnownSkillCommand } from "../skill-command";
@@ -93,9 +99,11 @@ import {
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
+	buildAsyncNotifyBlock,
 	buildAsyncResultComponent,
 	buildFileMentionBlock,
 	buildIrcMessageCard,
+	buildParentIrcMessageCard,
 	buildLaunchCompletionBlock,
 	normalizeToolArgs,
 	resolveAssistantErrorPresentation,
@@ -111,11 +119,6 @@ import {
 	cfgTerminalShowImages,
 } from "../settings";
 import { cfgReadToolResultPreview } from "../../tools/settings";
-
-interface RenderInitialMessagesOptions {
-	preserveExistingChat?: boolean;
-	clearTerminalHistory?: boolean;
-}
 
 const TRANSCRIPT_RENDER_CHUNK_MESSAGES = 32;
 const TRANSCRIPT_RENDER_CHUNK_MS = 8;
@@ -248,6 +251,8 @@ export class UiHelpers {
 	#textRendererSetVersion = 0;
 	/** The text renderer set changed while a replay was in flight; the commit retires stale scrollback. */
 	#textRendererSetChangedDuringReplay = false;
+	/** The latest line of each keyed status ({@link ShowStatusOptions.key}). */
+	readonly #keyedStatuses = new Map<string, StatusNotice>();
 
 	constructor(private ctx: InteractiveModeContext) {}
 
@@ -257,7 +262,8 @@ export class UiHelpers {
 	 * If multiple status messages are emitted back-to-back (without anything else being added to the chat),
 	 * we update the previous status line instead of appending new ones to avoid log spam. A repeat of the
 	 * exact same text replaces the line with a fresh notice: an in-place update with identical props sends
-	 * nothing to a native terminal, so its expired toast would never show again.
+	 * nothing to a native terminal, so its expired toast would never show again. `key` and `collapse`
+	 * opt out of that positional merge; see {@link ShowStatusOptions}.
 	 */
 	showStatus(message: string, options?: ShowStatusOptions): void {
 		const children = this.ctx.chatContainer.children;
@@ -266,9 +272,24 @@ export class UiHelpers {
 		// Resolve the dim color lazily so a later theme change re-shapes the line
 		// instead of leaving the palette that was active when it was presented.
 		const styleFn = useDim ? (t: string) => theme.fg("dim", t) : undefined;
-		const notice = { styleFn, toast: options?.toast };
+		const notice = { styleFn, toast: options?.toast, action: options?.action };
+		const key = options?.key;
 
-		if (last && last === this.ctx.lastStatus) {
+		if (key !== undefined) {
+			const keyed = this.#keyedStatuses.get(key);
+			if (keyed && this.ctx.chatContainer.canRemoveBlock(keyed) && this.#onlyNoticesBelow(keyed)) {
+				keyed.setMessage(message, notice);
+				this.ctx.ui.requestRender();
+				return;
+			}
+			const status = new StatusNotice(message, notice);
+			this.ctx.present([status]);
+			this.#keyedStatuses.set(key, status);
+			return;
+		}
+
+		const collapse = options?.collapse ?? true;
+		if (collapse && last && last === this.ctx.lastStatus) {
 			if (this.ctx.lastStatus.message !== message) {
 				this.ctx.lastStatus.setMessage(message, notice);
 				this.ctx.ui.requestRender();
@@ -279,7 +300,19 @@ export class UiHelpers {
 
 		const status = new StatusNotice(message, notice);
 		this.ctx.present([status]);
-		this.ctx.lastStatus = status;
+		if (collapse) this.ctx.lastStatus = status;
+	}
+
+	/** Whether `status` is still in the chat with nothing but notices after it. */
+	#onlyNoticesBelow(status: StatusNotice): boolean {
+		const children = this.ctx.chatContainer.children;
+		const index = children.lastIndexOf(status);
+		if (index === -1) return false;
+		for (let i = index + 1; i < children.length; i++) {
+			const child = children[i];
+			if (!(child instanceof StatusNotice || child instanceof TranscriptNotice)) return false;
+		}
+		return true;
 	}
 
 	addMessageToChat(message: AgentMessage, options?: AddMessageOptions): Component[] {
@@ -296,7 +329,9 @@ export class UiHelpers {
 					images: message.images,
 					showImages: cfgTerminalShowImages.get(settings),
 				});
-				this.ctx.chatContainer.addChild(component);
+				const block = new PresentedBlock(component, messageBlock(message));
+				block.setExpanded(this.ctx.toolOutputExpanded);
+				this.ctx.chatContainer.addChild(block);
 				break;
 			}
 			case "pythonExecution": {
@@ -308,7 +343,9 @@ export class UiHelpers {
 					truncation: message.meta?.truncation,
 					artifactError: message.meta?.artifactError,
 				});
-				this.ctx.chatContainer.addChild(component);
+				const block = new PresentedBlock(component, messageBlock(message));
+				block.setExpanded(this.ctx.toolOutputExpanded);
+				this.ctx.chatContainer.addChild(block);
 				break;
 			}
 			case "hookMessage":
@@ -316,7 +353,10 @@ export class UiHelpers {
 				if (message.display) {
 					if (message.customType === "async-result") {
 						const renderer = this.ctx.viewSession.extensionRunner?.getMessageRenderer(message.customType);
-						const component = buildAsyncResultComponent(message, renderer);
+						const component = new PresentedBlock(
+							buildAsyncResultComponent(message, renderer),
+							messageBlock(message),
+						);
 						component.setExpanded(this.ctx.toolOutputExpanded);
 						this.ctx.chatContainer.addChild(component);
 						break;
@@ -330,13 +370,24 @@ export class UiHelpers {
 						// Native: into the edit/write frames they belong to; the rest stand alone.
 						const files = routeLateDiagnostics(this.ctx.chatContainer.children, details?.files ?? []);
 						if (files.length === 0) break;
-						const component = new LateDiagnosticsMessageComponent(files);
+						const component = new PresentedBlock(
+							new LateDiagnosticsMessageComponent(files),
+							messageBlock(message),
+						);
 						component.setExpanded(this.ctx.toolOutputExpanded);
 						this.ctx.chatContainer.addChild(component);
 						break;
 					}
 					if (message.customType === LAUNCH_COMPLETION_MESSAGE_TYPE) {
-						this.ctx.chatContainer.addChild(buildLaunchCompletionBlock(message));
+						const component = new PresentedBlock(buildLaunchCompletionBlock(message), messageBlock(message));
+						component.setExpanded(this.ctx.toolOutputExpanded);
+						this.ctx.chatContainer.addChild(component);
+						break;
+					}
+					if (message.customType === ASYNC_NOTIFY_MESSAGE_TYPE) {
+						const component = new PresentedBlock(buildAsyncNotifyBlock(message), messageBlock(message));
+						component.setExpanded(this.ctx.toolOutputExpanded);
+						this.ctx.chatContainer.addChild(component);
 						break;
 					}
 					if (message.customType === COLLAB_PROMPT_MESSAGE_TYPE) {
@@ -345,7 +396,10 @@ export class UiHelpers {
 						break;
 					}
 					if (message.customType === SKILL_PROMPT_MESSAGE_TYPE) {
-						const component = new SkillMessageComponent(message as CustomMessage<SkillPromptDetails>);
+						const component = new PresentedBlock(
+							new SkillMessageComponent(message as CustomMessage<SkillPromptDetails>),
+							messageBlock(message),
+						);
 						component.setExpanded(this.ctx.toolOutputExpanded);
 						this.ctx.chatContainer.addChild(component);
 						break;
@@ -362,9 +416,12 @@ export class UiHelpers {
 					}
 					if (message.customType === "advisor") {
 						const details = (message as CustomMessage<AdvisorMessageDetails>).details;
-						this.ctx.chatContainer.addChild(
+						const card = new PresentedBlock(
 							createAdvisorMessageCard(details, () => this.ctx.toolOutputExpanded, theme),
+							messageBlock(message),
 						);
+						card.setExpanded(this.ctx.toolOutputExpanded);
+						this.ctx.chatContainer.addChild(card);
 						break;
 					}
 					if (message.customType === BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE) {
@@ -407,6 +464,15 @@ export class UiHelpers {
 			}
 			case "user":
 			case "developer": {
+				if (message.role === "user" && message.parentIrc) {
+					const card = buildParentIrcMessageCard(
+						message.parentIrc,
+						message.timestamp,
+						() => this.ctx.toolOutputExpanded,
+					);
+					this.ctx.chatContainer.addChild(card);
+					break;
+				}
 				const userText = message.role === "user" ? textContent(message.content) : "";
 				if (userText) {
 					const isSynthetic = message.role === "developer" ? true : (message.synthetic ?? false);
@@ -531,6 +597,10 @@ export class UiHelpers {
 		let pendingReadUsageCallIds: string[] | undefined;
 		let pendingUsageTurnElapsed: number | undefined;
 		let turnStartedAt: number | undefined;
+		// Rebuild-time mirror of the controller's turn tally: the message that ends
+		// a run gets the turn's totals, and with them the native footer under its
+		// answer (`⧉ · 12.4s · 19K tok this turn`) whose Copy copies the answer.
+		const turnUsage = new TurnUsageTally();
 		const flushPendingUsage = () => {
 			if (!pendingUsage) return;
 			const usageAttached =
@@ -648,6 +718,8 @@ export class UiHelpers {
 				const errorPresentation = resolveAssistantErrorPresentation(message, this.ctx.viewSession.retryAttempt);
 				const hasErrorStop = errorPresentation.kind === "full";
 				const errorMessage = hasErrorStop ? errorPresentation.text : null;
+				// The turn's footer goes under the last answer drawn, as live.
+				let lastSegment: AssistantMessageComponent | undefined;
 				const appendAssistantSegment = (toolCallId: string) => {
 					const segment = timeline.afterToolCalls.get(toolCallId);
 					if (!segment || !assistantHasVisibleContent(segment)) return;
@@ -658,6 +730,7 @@ export class UiHelpers {
 						timeline.contentOffsets.get(toolCallId),
 					);
 					this.ctx.chatContainer.addChild(component);
+					lastSegment = component;
 				};
 
 				// Render tool call components
@@ -766,6 +839,8 @@ export class UiHelpers {
 						new StrippedToolCallsPlaceholder(strippedToolCalls, !this.ctx.hideToolActivity),
 					);
 				}
+				const turnSummary = turnUsage.add(message, turnStartedAt);
+				if (turnSummary) (lastSegment ?? assistantComponent)?.setTurnUsage(turnSummary);
 				pendingUsage =
 					cfgDisplayShowTokenUsage.get(this.ctx.settings) && assistantUsageIsBilled(message.usage)
 						? message.usage
@@ -780,8 +855,12 @@ export class UiHelpers {
 			} else if (message.role === "toolResult") {
 				if (options.preservedLiveToolCallIds?.has(message.toolCallId)) continue;
 				const pendingReadComponent = this.ctx.pendingTools.get(message.toolCallId);
+				// Mirror the call side: resolve the wire toolName through the registry
+				// so aliased results route under the canonical name their call used.
+				const tool = this.ctx.viewSession.getToolByName(message.toolName);
+				const renderToolName = toolRenderName(message.toolName, tool);
 				const isReadGroupResult =
-					message.toolName === "read" &&
+					renderToolName === "read" &&
 					(!pendingReadComponent || pendingReadComponent instanceof ReadToolGroupComponent);
 				if (isReadGroupResult) {
 					const assistantComponent = readToolCallAssistantComponents.get(message.toolCallId);
@@ -859,13 +938,13 @@ export class UiHelpers {
 					} else {
 						this.ctx.pendingTools.delete(message.toolCallId);
 						if (
-							message.toolName === "wait" &&
+							renderToolName === "wait" &&
 							component instanceof ToolExecutionComponent &&
 							component.isDisplaceableBlock()
 						) {
 							waitingPoll = component;
 						} else if (
-							message.toolName === "todo" &&
+							renderToolName === "todo" &&
 							component instanceof ToolExecutionComponent &&
 							component.canBeDisplacedBy("todo")
 						) {
@@ -888,7 +967,10 @@ export class UiHelpers {
 				if (message.role === "user") resolveTodoSnapshot();
 				// Only genuinely user-attributed prompts anchor the delta; a mid-run
 				// agent-attributed `user` message (advisor tool-loop redirect) must not.
-				if (message.role === "user" && message.attribution !== "agent") turnStartedAt = message.timestamp;
+				if (message.role === "user" && message.attribution !== "agent") {
+					turnStartedAt = message.timestamp;
+					turnUsage.reset();
+				}
 				// A synthetic developer message initiates a fresh run (auto-continue,
 				// /goal, approved plan): replay must not inherit the preceding user
 				// prompt's timestamp, mirroring the live agent_start clear. Same-turn
@@ -899,9 +981,11 @@ export class UiHelpers {
 					// turn's own prompt: anchor the delta to it instead of clearing.
 					if (message.userInitiated) turnStartedAt = message.timestamp;
 					else turnStartedAt = undefined;
+					turnUsage.reset();
 				}
 				if (message.role === "custom" && isUserTurnInitiator(message as CustomMessage)) {
 					turnStartedAt = message.timestamp;
+					turnUsage.reset();
 				}
 				// All other messages use standard rendering
 				this.ctx.addMessageToChat(message, { reuseSettledComponent: options.reuseSettledComponents });
@@ -941,6 +1025,22 @@ export class UiHelpers {
 		if (backgroundCallIds.size > 0) {
 			this.ctx.eventController?.markBackgroundCalls(backgroundCallIds);
 		}
+		// The idle recap is journaled only in history.db, never in the session file, so a replay
+		// (resume, /restart, rebuild) would drop it. Re-show the newest one while the conversation
+		// has not moved since it was recorded and the view still stands at that point.
+		const sessionManager = this.ctx.viewSession.sessionManager;
+		const tip = this.ctx.viewSession.isStreaming ? undefined : sessionManager.getConversationTip();
+		if (tip) {
+			const [recap] = listSessionRecaps({ sessionIds: [sessionManager.getSessionId()], limit: 1 });
+			// `createdAt` has second precision; a recap lands at least a second after the turn it follows.
+			if (recap && recap.createdAt * 1000 > Date.parse(tip.timestamp)) {
+				const text = previewLine(recap.recap, TRUNCATE_LENGTHS.RECAP);
+				if (text) this.ctx.chatContainer.addChild(new RecapNotice(text));
+			}
+		}
+		// A compaction (or model/plan-mode switch) after the last assistant turn
+		// rewrote the prompt prefix: the next live turn's miss is expected.
+		if (sessionContext.nextCacheMissExplained) this.ctx.lastAssistantUsage = undefined;
 
 		// Entries still in `pendingTools` are toolCalls whose result never landed
 		// during the replay — with `keepInFlightToolCalls` these are exactly the
@@ -1204,6 +1304,7 @@ export class UiHelpers {
 				}
 			}
 			committed = true;
+			options.onCommit?.(context);
 
 			// Show compaction info if session was compacted.
 			const allEntries = this.ctx.viewSession.sessionManager.getEntries();

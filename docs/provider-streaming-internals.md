@@ -5,11 +5,11 @@ This document explains how token/tool streaming is normalized in `@oh-my-pi/pi-a
 ## End-to-end flow
 
 1. `streamSimple()` (`packages/ai/src/stream.ts`) resolves credentials, maps generic options, and dispatches to a provider stream function. Built-ins use the eagerly imported adapters in `packages/ai/src/providers/register-builtins.ts`; routing wrappers and extension-registered APIs have their own dispatch paths. Shared dispatch also applies provider in-flight limits, leaked-thinking healing, and thinking-loop guards.
-2. Provider stream functions translate provider-native stream events into the unified `AssistantMessageEvent` sequence. Built-ins include Anthropic, OpenAI Responses/Completions/Codex/Azure Responses, Google Gemini/Gemini CLI/Vertex, Bedrock Converse, Ollama, Cursor, Devin, Apple Foundation Models, and pi-native gateway transport, plus GitLab Duo, GitLab Duo Workflow, Kimi, and Synthetic wrappers. xAI Grok uses the shared OpenAI Responses path with catalog-level compat. OpenRouter defaults to Responses; `PI_OPENROUTER_RESPONSES=0` selects Chat Completions.
+2. Provider stream functions translate provider-native stream events into the unified `AssistantMessageEvent` sequence. Built-ins include Anthropic, OpenAI Responses/Completions/Codex/Azure Responses, Google Gemini/Antigravity/Vertex, Bedrock Converse, Ollama, Cursor, Devin, Apple Foundation Models, and pi-native gateway transport, plus GitLab Duo, GitLab Duo Workflow, Kimi, and Synthetic wrappers. xAI Grok uses the shared OpenAI Responses path with catalog-level compat. OpenRouter defaults to Responses; `PI_OPENROUTER_RESPONSES=0` selects Chat Completions.
 3. Each provider pushes events into `AssistantMessageEventStream` (`packages/ai/src/utils/event-stream.ts`), which exposes:
    - async iteration for incremental updates
    - `result()` for the final `AssistantMessage`
-4. The built-in forwarding wrapper supplies watchdogs where the provider does not own them. Anthropic and the OpenAI family own first-event and idle handling; Gemini CLI owns first-event recovery while the wrapper handles idle gaps. The synthetic `start` event does not count as first progress. Providers can mark server-requested local work with `trackLocalWork()` (and forward that state with `forwardLocalWorkFrom()`) so it does not look like a stall.
+4. The built-in forwarding wrapper supplies watchdogs where the provider does not own them. Anthropic and the OpenAI family own first-event and idle handling; Cloud Code Assist owns first-event recovery while the wrapper handles idle gaps. The synthetic `start` event does not count as first progress. Providers can mark server-requested local work with `trackLocalWork()` (and forward that state with `forwardLocalWorkFrom()`) so it does not look like a stall.
 5. `agentLoop` (`packages/agent/src/agent-loop.ts`) consumes those events, updates in-flight assistant state, and emits `message_update` events carrying read-only snapshots of the assistant event and message. Open blocks are copied incrementally; finalized blocks are shared between snapshots.
 6. `AgentSession` (`packages/coding-agent/src/session/agent-session.ts`) subscribes to agent events, persists messages, drives extension hooks, and applies session behaviors (retry, compaction, TTSR, streaming-edit abort checks).
 
@@ -102,6 +102,53 @@ Tool-call argument streaming:
 - custom tools stream raw string input and expose final arguments as `{ input: <raw> }`
 - providers that send only `response.function_call_arguments.done` still populate final args
 - tool call IDs are normalized as `"<call_id>|<item_id>"`
+
+### Standard Responses transport ownership
+
+The user-facing contract lives in [Standard Responses WebSockets](./models.md#standard-responses-websockets).
+`settings-stream-fn.ts` adapts the independent API settings at the application
+boundary; `resolveResponsesWebSocketPreference` applies final catalog capability
+and model/request vetoes in the standard provider, without a Settings dependency.
+
+`providers/responses-websocket-connection.ts` contains the single physical channel
+implementation, extracted from Codex. `ResponsesWebSocketConnection` owns connect
+settlement, socket health, the bounded queue, one reader, frame/sequence guards,
+optional heartbeats, cancellation and typed transport errors.
+`utils/websocket.ts` continues to own shared URL/header utilities.
+`providers/openai-responses-session.ts` owns standard `response.create` exchanges,
+socket-local baselines, leases and logical transport state.
+`openai-codex-responses.ts` composes the same channel while retaining Codex's
+steering/control frames, successor receive/attach, Lite shaping, legacy error
+translation and recovery. Sharing the channel does not apply standard fallback
+policy to Codex or change its timers/environment controls.
+
+Each standard lease admits one active exchange. A concurrent request for the same
+scope receives an independent temporary socket, not a busy connection's reader or
+baseline. Reuse requires an open channel with recent inbound activity, within the
+30-second idle reuse limit. Standard channels use a queue capacity of 4096 and no
+heartbeat. A normally closed or health-retired socket after successful completion
+is replaced by a new WS connection with full input and no previous socket's anchor;
+that replacement is not an SSE downgrade.
+
+#### Request preparation and lifetime
+
+`prepareRequest` builds and hooks each candidate before the socket connects.
+A pre-send HTTP fallback rebuilds through the same preparation path; strict-tool
+corrections reuse it too. The physical handshake callback runs only for a newly
+connected channel, not for each exchange on a retained socket.
+
+`timeResponsesStream` owns standard stream deadlines. HTTP keeps its headers
+watchdog and existing first-event semantics; WS preserves one first-event budget
+across bounded parameter corrections. Priming exposes a definite first-frame
+rejection to those corrections; it is not a second timeout owner. Connect retains
+its separate bounded deadline, while Codex keeps its own channel deadlines.
+
+Logical entries count active leases independently of the retained connection.
+Idle retirement or release removes an entry only when it has no connection, no
+active lease, no sticky downgrade and no pending failure counts (pre-send connect
+failures, stale-anchor rejections, or disabled continuation). Such entries remain
+until their existing session/provider owner releases them, so a temporary sibling
+cannot erase a later network downgrade or change the identity of an outstanding lease.
 
 ### OpenRouter native finish reasons
 

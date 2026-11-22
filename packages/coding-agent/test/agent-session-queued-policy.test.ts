@@ -45,6 +45,7 @@ function extension(name: string, handler: (event: BeforeAgentStartEvent) => Prom
 		tools: new Map(),
 		assistantThinkingRenderers: [],
 		assistantTextRenderers: [],
+		transcriptPresenters: [],
 		linkSchemes: [],
 		fileWriteFallbackHandlers: [],
 		fileDeleteFallbackHandlers: [],
@@ -160,7 +161,7 @@ describe("queued user delivery policy", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"todo.enabled": false,
-			"tools.xdev": false,
+			"tools.commands": false,
 			"memory.backend": backendId,
 			"mnemopi.dbPath": dir.join("memory.db"),
 			"mnemopi.scoping": "global",
