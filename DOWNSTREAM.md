@@ -2,6 +2,17 @@
 
 This is an independently maintained fork of [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi). Compatibility with upstream is not guaranteed. Use this repository's releases and package-manager commands, not upstream's installer or updater.
 
+## Changes on top of upstream
+
+Behavioral changes this fork carries beyond the build and release pipeline (authoritative list: `git diff upstream/main..HEAD`):
+
+- **Per-item Hindsight retain tags.** The `retain` tool accepts optional per-item `tags` that replace the session-default tags for that item; global items stay untagged, tagged requests send `observation_scopes: combined`, and every item's tags are validated before any part of a batch is queued. Ported onto upstream's durable retain outbox. See [docs/memory.md](docs/memory.md).
+- **Local judgment fixes.** Small local models judge multi-question requests one question at a time (`LocalJudge`), and an explicit empty `retry.fallbackChains.judge` chain opts out of remote/session judge fallback. Opt-in quality runner: `bun packages/coding-agent/bench/local-judge.ts`. See [docs/local-models.md](docs/local-models.md).
+- **Subagent resolved model exposure.** A subagent's resolved model is surfaced in task envelopes and session history titles.
+- **Downstream build and release pipeline.** `scripts/build-downstream.ts`, `.github/workflows/downstream.yml`, archive hygiene checks, and this document.
+
+Superseded by upstream in the 19.1.0 merge: the global-untagged retain batching fix — upstream's outbox groups requests by tag set natively. Do not re-port it.
+
 ## Versions and supported platform
 
 `downstream-version.txt` is the downstream release version: `<upstream-version>-egon.<revision>`, initially `18.16.0-egon.1`. Increment the downstream revision for each changed build; do not replace assets of a published version. When integrating a newer upstream, change the upstream part and restart at `egon.1`.

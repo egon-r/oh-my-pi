@@ -13,7 +13,6 @@
  */
 import { createHash, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
-import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildExportViewer } from "../packages/collab-web/scripts/build-export-viewer";
@@ -154,10 +153,10 @@ async function main(): Promise<void> {
 		originalStats = await fs.readFile(statsPath);
 		await run([process.execPath, "run", "gen:stats"]);
 		const viewerMetadata = await buildExportViewer({ outDir: path.join(temporary, "export-assets") });
-		const updatePath = path.join(root, "packages/coding-agent/src/cli/update-cli.ts");
+		const updatePath = path.join(root, "packages/coding-agent/src/cli/managed-install.ts");
 		const updateSource = await fs.readFile(updatePath, "utf8");
 		const managerSignature =
-			"export async function managedInstallName(binaryPath: string): Promise<string | undefined> {";
+			"export async function managedInstallName(installPath: string): Promise<string | undefined> {";
 		if (updateSource.split(managerSignature).length !== 2)
 			throw new Error("Upstream managed-install boundary changed; review downstream updater policy");
 		// Every downstream binary, including manually extracted archives, must use
@@ -166,9 +165,6 @@ async function main(): Promise<void> {
 			managerSignature,
 			`${managerSignature}\n\treturn "egon downstream releases (https://github.com/egon-r/oh-my-pi/releases)";`,
 		);
-		const require = createRequire(import.meta.url);
-		const transformersVersion = require("@huggingface/transformers/package.json").version;
-		if (typeof transformersVersion !== "string") throw new Error("Missing Transformers.js version");
 		const stage = path.join(temporary, "stage");
 		await fs.mkdir(path.join(stage, "bin"), { recursive: true });
 		const outfile = path.join(stage, "bin/omp");
@@ -176,9 +172,8 @@ async function main(): Promise<void> {
 			repoRoot: root,
 			entrypoint: path.join(root, "packages/coding-agent/src/cli.ts"),
 			outfile,
-			transformersVersion,
-			native: { platform: host.platform, arch: host.arch },
 			target: host.target,
+			native: { platform: host.platform, arch: host.arch },
 			minifyIdentifiers: true,
 			skipBuiltinCodesign: host.platform === "darwin",
 			files: {
