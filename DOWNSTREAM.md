@@ -24,24 +24,28 @@ The compiled version string identifies this fork. Native code is reused from the
 
 ## Install with mise
 
-```sh
-mise install 'github:egon-r/oh-my-pi[asset_pattern=omp-macos-arm64.tar.gz,bin_path=bin]@18.16.0-egon.1'
-mise exec 'github:egon-r/oh-my-pi[asset_pattern=omp-macos-arm64.tar.gz,bin_path=bin]@18.16.0-egon.1' -- omp --version
+mise is the supported install channel. Pin the version in `~/.config/mise/config.toml` rather than passing the backend-qualified id with `@version` on the CLI — on mise 2026.8.0 that form mangles the release-tag lookup (it queries a literal `repo@version` tag and 404s):
+
+```toml
+[tools]
+"github:egon-r/oh-my-pi[asset_pattern=omp-macos-arm64.tar.gz,bin_path=bin]" = "19.1.0-egon.1"
 ```
 
-Installation alone does not replace your active OMP. To deliberately select it globally, remove or deactivate any competing OMP tool declaration first, then run:
+Then:
 
 ```sh
-mise use --global 'github:egon-r/oh-my-pi[asset_pattern=omp-macos-arm64.tar.gz,bin_path=bin]@18.16.0-egon.1'
+mise install
+mise exec -- omp --version
 ```
 
-Pin an exact version, especially for a freshly published release; mise's release-age filter can exclude new releases from `latest`. To upgrade, repeat with a newer published downstream version. `mise where github:egon-r/oh-my-pi` locates its installation.
+On Linux x64 the same backend id works with the default asset matching (`omp-linux-x64`); macOS needs the `asset_pattern` shown above because the release also carries a Linux binary and checksums. Remove or deactivate any competing OMP tool declaration (for example an upstream `oh-my-pi` alias) first — installation alone does not change which binary `omp` resolves to. Pin an exact version, especially for a freshly published release: mise's release-age filter can exclude new releases from `latest`, and `latest` has also been observed resolving to an older `-egon.` revision. To upgrade, change the pinned version and rerun `mise install`. `mise where github:egon-r/oh-my-pi` locates the installation.
 
-## Install with Homebrew
+## Homebrew (paused)
+
+Homebrew releases are paused as of `19.1.0-egon.1`; the `egon-r/tap/omp-egon` formula is frozen at the `18.16.0-egon.x` builds and is not updated for newer releases. mise (above) is the supported channel.
 
 ```sh
 brew install egon-r/tap/omp-egon
-brew upgrade egon-r/tap/omp-egon
 ```
 
 The formula installs the same `omp` executable, so it conflicts with the upstream Homebrew formula. Choose one manager and check `command -v omp` before switching. A mise-managed binary can still precede Homebrew on PATH. Neither release installation nor switching package managers changes authentication or enables the experimental local judge.
@@ -75,7 +79,7 @@ Standard hosted macOS and Ubuntu runners are free while this repository is publi
 
 The inherited `CI`, `OMP Nix`, and `Warm bun store cache` workflows are disabled in this repository's Actions settings. Keep them disabled: they belong to upstream's larger infrastructure and publishing setup. The dedicated `Egon OMP` workflow is the maintained downstream path.
 
-After publishing, update `Formula/omp-egon.rb` in [egon-r/homebrew-tap](https://github.com/egon-r/homebrew-tap): change the version and release URL, and copy the **published archive's** SHA-256 from `SHA256SUMS`. Never use a checksum from a separate local rebuild; compiled archives may differ. The tap needs no GitHub credentials for public downloads.
+The Homebrew tap is paused: do not update `Formula/omp-egon.rb` in [egon-r/homebrew-tap](https://github.com/egon-r/homebrew-tap) for new releases. If Homebrew support is resumed later, change the version and release URL, and copy the **published archive's** SHA-256 from `SHA256SUMS` — never a checksum from a separate local rebuild; compiled archives may differ. The tap needs no GitHub credentials for public downloads.
 
 ## Maintenance and local judge
 

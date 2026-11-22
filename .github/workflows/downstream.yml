@@ -150,4 +150,4 @@ jobs:
             dist/omp-macos-arm64.tar.gz dist-linux/omp-linux-x64 dist/SHA256SUMS \
             --verify-tag --latest \
             --title "OMP $RELEASE_VERSION (egon-r)" \
-            --notes "Custom egon-r downstream. macOS Apple Silicon standalone binary, ad-hoc signed; Linux x64 standalone binary, unsigned. SHA-256 checksums attached for both artifacts. Install with mise github:egon-r/oh-my-pi or Homebrew egon-r/tap/omp-egon."
+            --notes "Custom egon-r downstream. macOS Apple Silicon standalone binary, ad-hoc signed; Linux x64 standalone binary, unsigned. SHA-256 checksums attached for both artifacts. Install with mise; see DOWNSTREAM.md for the pinned config recipe. Homebrew releases are paused."
