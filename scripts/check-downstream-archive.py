@@ -8,7 +8,9 @@ import tarfile
 # encrypted string inside an executable. Source review remains required.
 patterns = {
     # "dev" occurs in upstream's synthetic gallery fixtures; runner is public CI.
-    "workstation home path": rb"/Users/(?!(?:runner(?:/|_)|dev/))[A-Za-z0-9_.-]+/|/home/(?!runner/)[A-Za-z0-9_.-]+/",
+    # "linuxbrew" is the standard Linux Homebrew prefix bundled by upstream's
+    # Ghidra install probing, not a workstation home directory.
+    "workstation home path": rb"/Users/(?!(?:runner(?:/|_)|dev/))[A-Za-z0-9_.-]+/|/home/(?!runner/|linuxbrew/)[A-Za-z0-9_.-]+/",
     "GitHub credential": rb"gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{70,}",
     "OpenAI project credential": rb"sk-proj-[A-Za-z0-9_-]{40,}",
 }
